@@ -1,6 +1,6 @@
 {
   "name": "awesome-comic-converter",
-  "version": "1.0.0",
+  "version": "2.1.0",
   "description": "A web-based application for converting DRM-free Amazon comic book files (AZW3) to CBZ format",
   "main": "index.html",
   "scripts": {
@@ -18,8 +18,8 @@
     "comic-book",
     "ebook"
   ],
-  "author": "Comic Converter Team",
-  "license": "MIT",
+  "author": "eD! Thomas",
+  "license": "LGPL-3.0-or-later",
   "repository": {
     "type": "git",
     "url": "https://github.com/your-username/awesome-comic-converter.git"

@@ -6,6 +6,7 @@
 class AZW3Parser {
     constructor() {
         this.textDecoder = new TextDecoder('utf-8');
+        this.securityUtils = new SecurityUtils();
     }
 
     /**
@@ -15,30 +16,52 @@ class AZW3Parser {
      */
     async parseFile(buffer) {
         try {
-            const dataView = new DataView(buffer);
-            const uint8Array = new Uint8Array(buffer);
-            
-            // Check if this is a valid Mobipocket/AZW3 file
-            const palmHeader = this.parsePalmHeader(dataView);
-            if (!palmHeader.isValid) {
-                throw new Error('Invalid AZW3 file format');
+            // Validate file size and structure
+            if (!buffer || buffer.byteLength === 0) {
+                throw new Error('Empty or invalid file');
             }
+            
+            if (buffer.byteLength < 78) { // Minimum size for Palm header
+                throw new Error('File too small to be a valid AZW3 file');
+            }
+            
+            // Track memory usage
+            this.securityUtils.trackMemoryUsage(buffer.byteLength, 'add');
+            
+            try {
+                // Validate file signature
+                this.securityUtils.validateFileSignature(buffer, 'azw3');
+                
+                const dataView = new DataView(buffer);
+                const uint8Array = new Uint8Array(buffer);
+                
+                // Check if this is a valid Mobipocket/AZW3 file
+                const palmHeader = this.parsePalmHeader(dataView);
+                if (!palmHeader.isValid) {
+                    throw new Error('Invalid AZW3 file format');
+                }
 
-            // Find and parse MOBI header
-            const mobiHeader = this.parseMobiHeader(dataView, palmHeader);
-            
-            // Extract images from the file
-            const images = await this.extractImages(uint8Array, palmHeader, mobiHeader);
-            
-            // Extract metadata
-            const metadata = this.extractMetadata(dataView, mobiHeader);
-            
-            return {
-                images,
-                metadata,
-                pageCount: images.length
-            };
+                // Find and parse MOBI header
+                const mobiHeader = this.parseMobiHeader(dataView, palmHeader);
+                
+                // Extract images from the file
+                const images = await this.extractImages(uint8Array, palmHeader, mobiHeader);
+                
+                // Extract metadata
+                const metadata = this.extractMetadata(dataView, mobiHeader);
+                
+                return {
+                    images,
+                    metadata,
+                    pageCount: images.length
+                };
+            } finally {
+                // Clean up memory tracking
+                this.securityUtils.trackMemoryUsage(buffer.byteLength, 'remove');
+            }
         } catch (error) {
+            // Clean up memory tracking on error
+            this.securityUtils.trackMemoryUsage(buffer.byteLength, 'remove');
             throw new Error(`Failed to parse AZW3 file: ${error.message}`);
         }
     }

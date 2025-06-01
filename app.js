@@ -5,11 +5,15 @@
 
 class ComicConverter {
     constructor() {
+        this.securityUtils = new SecurityUtils();
         this.parser = new AZW3Parser();
         this.opfParser = new OPFParser();
         this.processingFiles = new Map();
         this.completedFiles = new Map();
         this.errors = [];
+        
+        // Setup global error handling
+        this.securityUtils.setupGlobalErrorHandler();
         
         this.initializeEventListeners();
         this.initializeTheme();
@@ -119,10 +123,8 @@ class ComicConverter {
                     if (!file.webkitRelativePath) {
                         // Create a synthetic path based on common folder name
                         const folderName = this.inferFolderName(files);
-                        Object.defineProperty(file, 'webkitRelativePath', {
-                            value: `${folderName}/${file.name}`,
-                            writable: false
-                        });
+                        // Use a safer approach to track file paths
+                        file._syntheticPath = `${folderName}/${file.name}`;
                     }
                 });
             }
@@ -163,11 +165,8 @@ class ComicConverter {
                         if (entry.isFile) {
                             const file = await this.getFileFromEntry(entry);
                             if (file) {
-                                // Set the webkitRelativePath
-                                Object.defineProperty(file, 'webkitRelativePath', {
-                                    value: `${dirEntry.name}/${fullPath}`,
-                                    writable: false
-                                });
+                                // Use a safer approach to track file paths
+                                file._syntheticPath = `${dirEntry.name}/${fullPath}`;
                                 files.push(file);
                             }
                         } else if (entry.isDirectory) {
@@ -228,19 +227,32 @@ class ComicConverter {
     async handleFiles(files) {
         if (files.length === 0) return;
 
-        // Clear previous results
-        this.clearResults();
-        
-        // Show processing section
-        document.getElementById('processingSection').style.display = 'block';
-        
-        // Process each file
-        for (const file of files) {
-            await this.processFile(file);
+        try {
+            // Validate batch size and file sizes
+            this.securityUtils.validateBatchSize(files);
+            
+            // Validate each file
+            for (const file of files) {
+                this.securityUtils.validateFileSize(file);
+                this.securityUtils.validateFileExtension(file.name, ['azw3']);
+            }
+
+            // Clear previous results
+            this.clearResults();
+            
+            // Show processing section
+            document.getElementById('processingSection').style.display = 'block';
+            
+            // Process each file with rate limiting
+            for (const file of files) {
+                await this.securityUtils.addToProcessingQueue(() => this.processFile(file));
+            }
+            
+            // Show results
+            this.showResults();
+        } catch (error) {
+            this.showError('Validation Error', this.securityUtils.sanitizeErrorMessage(error));
         }
-        
-        // Show results
-        this.showResults();
     }
 
     /**
@@ -249,22 +261,37 @@ class ComicConverter {
     async handleFolders(files) {
         if (files.length === 0) return;
 
-        // Clear previous results
-        this.clearResults();
-        
-        // Show processing section
-        document.getElementById('processingSection').style.display = 'block';
-        
-        // Group files by folder
-        const folderGroups = this.groupFilesByFolder(files);
-        
-        // Process each folder
-        for (const [folderPath, folderFiles] of folderGroups) {
-            await this.processFolderGroup(folderPath, folderFiles);
+        try {
+            // Validate batch size and file sizes
+            this.securityUtils.validateBatchSize(files);
+            
+            // Validate each file
+            for (const file of files) {
+                this.securityUtils.validateFileSize(file);
+                // Allow various file types in folders (azw3, opf, jpg, png, gif)
+                const allowedExtensions = ['azw3', 'opf', 'jpg', 'jpeg', 'png', 'gif', 'json'];
+                this.securityUtils.validateFileExtension(file.name, allowedExtensions);
+            }
+
+            // Clear previous results
+            this.clearResults();
+            
+            // Show processing section
+            document.getElementById('processingSection').style.display = 'block';
+            
+            // Group files by folder
+            const folderGroups = this.groupFilesByFolder(files);
+            
+            // Process each folder with rate limiting
+            for (const [folderPath, folderFiles] of folderGroups) {
+                await this.securityUtils.addToProcessingQueue(() => this.processFolderGroup(folderPath, folderFiles));
+            }
+            
+            // Show results
+            this.showResults();
+        } catch (error) {
+            this.showError('Validation Error', this.securityUtils.sanitizeErrorMessage(error));
         }
-        
-        // Show results
-        this.showResults();
     }
 
     /**
@@ -274,7 +301,7 @@ class ComicConverter {
         const groups = new Map();
         
         for (const file of files) {
-            const path = file.webkitRelativePath || file.name;
+            const path = file.webkitRelativePath || file._syntheticPath || file.name;
             const folderPath = path.includes('/') ? path.substring(0, path.lastIndexOf('/')) : '';
             
             if (!groups.has(folderPath)) {
@@ -359,10 +386,11 @@ class ComicConverter {
             
         } catch (error) {
             console.error('Error processing folder:', error);
-            this.updateFileStatus(fileId, `Error: ${error.message}`, 0, 'error');
+            const sanitizedError = this.securityUtils.sanitizeErrorMessage(error);
+            this.updateFileStatus(fileId, `Error: ${sanitizedError}`, 0, 'error');
             this.errors.push({
                 fileName: `${folderName} (folder)`,
-                error: error.message
+                error: sanitizedError
             });
         }
     }
@@ -412,10 +440,11 @@ class ComicConverter {
             
         } catch (error) {
             console.error('Error processing file:', error);
-            this.updateFileStatus(fileId, `Error: ${error.message}`, 0, 'error');
+            const sanitizedError = this.securityUtils.sanitizeErrorMessage(error);
+            this.updateFileStatus(fileId, `Error: ${sanitizedError}`, 0, 'error');
             this.errors.push({
                 fileName: file.name,
-                error: error.message
+                error: sanitizedError
             });
         }
     }
@@ -542,15 +571,14 @@ class ComicConverter {
      * Generate unique file ID
      */
     generateFileId(file) {
-        return `${file.name}_${file.size}_${Date.now()}`;
+        return `file_${this.securityUtils.generateSecureId()}`;
     }
 
     /**
      * Generate unique folder ID
      */
     generateFolderId(folderPath, files) {
-        const totalSize = files.reduce((sum, file) => sum + file.size, 0);
-        return `${folderPath}_${totalSize}_${Date.now()}`;
+        return `folder_${this.securityUtils.generateSecureId()}`;
     }
 
     /**
@@ -559,18 +587,25 @@ class ComicConverter {
     addFolderToProcessingList(folderName, fileId, fileCount) {
         const fileList = document.getElementById('fileList');
         
-        const fileItem = document.createElement('div');
-        fileItem.className = 'file-item';
+        const fileItem = this.securityUtils.createSafeElement('div', '', 'file-item');
         fileItem.id = `file-${fileId}`;
         
-        fileItem.innerHTML = `
-            <h4>${this.escapeHtml(folderName)} (${fileCount} files)</h4>
-            <div class="progress-bar">
-                <div class="progress-fill" id="progress-${fileId}"></div>
-            </div>
-            <div class="status processing" id="status-${fileId}">Preparing...</div>
-        `;
+        // Create title
+        const title = this.securityUtils.createSafeElement('h4', `${folderName} (${fileCount} files)`);
         
+        // Create progress bar container
+        const progressBar = this.securityUtils.createSafeElement('div', '', 'progress-bar');
+        const progressFill = this.securityUtils.createSafeElement('div', '', 'progress-fill');
+        progressFill.id = `progress-${fileId}`;
+        progressBar.appendChild(progressFill);
+        
+        // Create status
+        const status = this.securityUtils.createSafeElement('div', 'Preparing...', 'status processing');
+        status.id = `status-${fileId}`;
+        
+        fileItem.appendChild(title);
+        fileItem.appendChild(progressBar);
+        fileItem.appendChild(status);
         fileList.appendChild(fileItem);
     }
 
@@ -580,18 +615,25 @@ class ComicConverter {
     addFileToProcessingList(file, fileId) {
         const fileList = document.getElementById('fileList');
         
-        const fileItem = document.createElement('div');
-        fileItem.className = 'file-item';
+        const fileItem = this.securityUtils.createSafeElement('div', '', 'file-item');
         fileItem.id = `file-${fileId}`;
         
-        fileItem.innerHTML = `
-            <h4>${this.escapeHtml(file.name)}</h4>
-            <div class="progress-bar">
-                <div class="progress-fill" id="progress-${fileId}"></div>
-            </div>
-            <div class="status processing" id="status-${fileId}">Preparing...</div>
-        `;
+        // Create title
+        const title = this.securityUtils.createSafeElement('h4', file.name);
         
+        // Create progress bar container
+        const progressBar = this.securityUtils.createSafeElement('div', '', 'progress-bar');
+        const progressFill = this.securityUtils.createSafeElement('div', '', 'progress-fill');
+        progressFill.id = `progress-${fileId}`;
+        progressBar.appendChild(progressFill);
+        
+        // Create status
+        const status = this.securityUtils.createSafeElement('div', 'Preparing...', 'status processing');
+        status.id = `status-${fileId}`;
+        
+        fileItem.appendChild(title);
+        fileItem.appendChild(progressBar);
+        fileItem.appendChild(status);
         fileList.appendChild(fileItem);
     }
 
@@ -658,24 +700,35 @@ class ComicConverter {
                 metadataInfo += ' • 📋 Metadata';
             }
             
+            // Create download info section
+            const downloadInfo = this.securityUtils.createSafeElement('div', '', 'download-info');
+            
             // Add series info if available
-            let titleDisplay = this.escapeHtml(cbzFileName);
+            let titleDisplay = cbzFileName;
             if (fileData.metadata && fileData.metadata.series) {
-                titleDisplay = `${this.escapeHtml(fileData.metadata.series)}${fileData.metadata.seriesIndex ? ` #${fileData.metadata.seriesIndex}` : ''} - ${titleDisplay}`;
+                titleDisplay = `${fileData.metadata.series}${fileData.metadata.seriesIndex ? ` #${fileData.metadata.seriesIndex}` : ''} - ${titleDisplay}`;
             }
             
-            downloadItem.innerHTML = `
-                <div class="download-info">
-                    <h4>${titleDisplay}</h4>
-                    <p>${metadataInfo}</p>
-                    ${fileData.metadata && fileData.metadata.description ?
-                        `<small>${this.escapeHtml(fileData.metadata.description.substring(0, 100))}${fileData.metadata.description.length > 100 ? '...' : ''}</small>` :
-                        ''}
-                </div>
-                <button class="download-btn" onclick="app.downloadFile('${fileId}')">
-                    Download CBZ
-                </button>
-            `;
+            const title = this.securityUtils.createSafeElement('h4', titleDisplay);
+            const info = this.securityUtils.createSafeElement('p', metadataInfo);
+            
+            downloadInfo.appendChild(title);
+            downloadInfo.appendChild(info);
+            
+            // Add description if available
+            if (fileData.metadata && fileData.metadata.description) {
+                const description = fileData.metadata.description.substring(0, 100);
+                const descText = description + (fileData.metadata.description.length > 100 ? '...' : '');
+                const descElement = this.securityUtils.createSafeElement('small', descText);
+                downloadInfo.appendChild(descElement);
+            }
+            
+            // Create download button
+            const downloadBtn = this.securityUtils.createSafeElement('button', 'Download CBZ', 'download-btn');
+            downloadBtn.addEventListener('click', () => this.downloadFile(fileId));
+            
+            downloadItem.appendChild(downloadInfo);
+            downloadItem.appendChild(downloadBtn);
             
             downloadList.appendChild(downloadItem);
         }
@@ -701,14 +754,13 @@ class ComicConverter {
         errorList.innerHTML = '';
         
         for (const error of this.errors) {
-            const errorItem = document.createElement('div');
-            errorItem.className = 'error-item';
+            const errorItem = this.securityUtils.createSafeElement('div', '', 'error-item');
             
-            errorItem.innerHTML = `
-                <h4>${this.escapeHtml(error.fileName)}</h4>
-                <p>${this.escapeHtml(error.error)}</p>
-            `;
+            const fileName = this.securityUtils.createSafeElement('h4', error.fileName);
+            const errorMsg = this.securityUtils.createSafeElement('p', error.error);
             
+            errorItem.appendChild(fileName);
+            errorItem.appendChild(errorMsg);
             errorList.appendChild(errorItem);
         }
         
@@ -846,30 +898,16 @@ class ComicConverter {
      * Format file size for display
      */
     formatFileSize(bytes) {
-        if (bytes === 0) return '0 Bytes';
-        
-        const k = 1024;
-        const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-        const i = Math.floor(Math.log(bytes) / Math.log(k));
-        
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        return this.securityUtils.formatFileSize(bytes);
     }
 
-    /**
-     * Escape HTML to prevent XSS
-     */
-    escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-    }
 
     /**
      * Initialize theme system
      */
     initializeTheme() {
         // Check for saved theme preference
-        const savedTheme = localStorage.getItem('comic-converter-theme');
+        const savedTheme = this.securityUtils.safeLocalStorageGet('comic-converter-theme');
         
         if (savedTheme) {
             // Use saved preference
@@ -894,7 +932,7 @@ class ComicConverter {
                 const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
                 mediaQuery.addEventListener('change', (e) => {
                     // Only update if user hasn't manually set a preference
-                    if (!localStorage.getItem('comic-converter-theme')) {
+                    if (!this.securityUtils.safeLocalStorageGet('comic-converter-theme')) {
                         const newOsTheme = e.matches ? 'dark' : 'light';
                         document.documentElement.setAttribute('data-theme', newOsTheme);
                         
@@ -923,7 +961,7 @@ class ComicConverter {
      */
     setTheme(theme) {
         document.documentElement.setAttribute('data-theme', theme);
-        localStorage.setItem('comic-converter-theme', theme);
+        this.securityUtils.safeLocalStorageSet('comic-converter-theme', theme);
         
         // Update theme toggle icon
         const themeIcon = document.querySelector('.theme-icon');

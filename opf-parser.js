@@ -6,6 +6,7 @@
 class OPFParser {
     constructor() {
         this.parser = new DOMParser();
+        this.securityUtils = new SecurityUtils();
     }
 
     /**
@@ -15,6 +16,14 @@ class OPFParser {
      */
     parseOPF(opfContent) {
         try {
+            // Validate XML content for security
+            this.securityUtils.validateXmlContent(opfContent);
+            
+            // Limit content size to prevent memory exhaustion
+            if (opfContent.length > 1024 * 1024) { // 1MB limit for OPF files
+                throw new Error('OPF file too large');
+            }
+            
             const doc = this.parser.parseFromString(opfContent, 'text/xml');
             
             // Check for parsing errors
