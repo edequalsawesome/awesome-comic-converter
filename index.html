@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Comic Converter - AZW3 to CBZ</title>
+    <title>Awesome Comic Converter - AZW3 to CBZ</title>
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -11,7 +11,7 @@
         <header>
             <div class="header-content">
                 <div class="title-section">
-                    <h1>Comic Converter</h1>
+                    <h1>Awesome Comic Converter</h1>
                     <p>Convert DRM-free Amazon comic books (AZW3) to CBZ format</p>
                 </div>
                 <button class="theme-toggle" id="themeToggle" aria-label="Toggle dark mode">
@@ -62,7 +62,12 @@
             <div class="results-section" id="resultsSection" style="display: none;">
                 <h3>Conversion Complete</h3>
                 <div class="download-list" id="downloadList"></div>
-                <button type="button" class="clear-btn" id="clearBtn">Process More Files</button>
+                <div class="bulk-actions">
+                    <button type="button" class="download-all-btn" id="downloadAllBtn" style="display: none;">
+                        📦 Download All CBZ Files
+                    </button>
+                    <button type="button" class="clear-btn" id="clearBtn">Process More Files</button>
+                </div>
             </div>
 
             <div class="error-section" id="errorSection" style="display: none;">

@@ -25,6 +25,7 @@ class ComicConverter {
         const browseBtn = document.getElementById('browseBtn');
         const browseFolderBtn = document.getElementById('browseFolderBtn');
         const clearBtn = document.getElementById('clearBtn');
+        const downloadAllBtn = document.getElementById('downloadAllBtn');
         const themeToggle = document.getElementById('themeToggle');
 
         // File input events
@@ -33,6 +34,7 @@ class ComicConverter {
         browseBtn.addEventListener('click', () => fileInput.click());
         browseFolderBtn.addEventListener('click', () => folderInput.click());
         clearBtn.addEventListener('click', () => this.clearResults());
+        downloadAllBtn.addEventListener('click', () => this.downloadAllFiles());
         themeToggle.addEventListener('click', () => this.toggleTheme());
 
         // Drag and drop events
@@ -678,6 +680,14 @@ class ComicConverter {
             downloadList.appendChild(downloadItem);
         }
         
+        // Show/hide download all button based on number of files
+        const downloadAllBtn = document.getElementById('downloadAllBtn');
+        if (this.completedFiles.size > 1) {
+            downloadAllBtn.style.display = 'flex';
+        } else {
+            downloadAllBtn.style.display = 'none';
+        }
+        
         resultsSection.style.display = 'block';
     }
 
@@ -727,6 +737,75 @@ class ComicConverter {
     }
 
     /**
+     * Download all converted files as a single ZIP
+     */
+    async downloadAllFiles() {
+        if (this.completedFiles.size === 0) return;
+
+        const downloadAllBtn = document.getElementById('downloadAllBtn');
+        const originalText = downloadAllBtn.innerHTML;
+        
+        try {
+            // Disable button and show progress
+            downloadAllBtn.disabled = true;
+            downloadAllBtn.innerHTML = '📦 Creating ZIP...';
+
+            // Create a new ZIP file containing all CBZ files
+            const zip = new JSZip();
+            
+            // Add each CBZ file to the ZIP
+            for (const [fileId, fileData] of this.completedFiles) {
+                const cbzFileName = fileData.originalName.replace(/\.azw3$/i, '.cbz');
+                
+                // Add the CBZ blob to the ZIP
+                zip.file(cbzFileName, fileData.cbzBlob);
+            }
+
+            // Update button text
+            downloadAllBtn.innerHTML = '📦 Generating ZIP...';
+
+            // Generate the ZIP file
+            const zipBlob = await zip.generateAsync({
+                type: 'blob',
+                compression: 'DEFLATE',
+                compressionOptions: {
+                    level: 6
+                }
+            });
+
+            // Create download link
+            const timestamp = new Date().toISOString().slice(0, 19).replace(/[:-]/g, '');
+            const zipFileName = `comic_collection_${timestamp}.zip`;
+            
+            const url = URL.createObjectURL(zipBlob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = zipFileName;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+
+            // Clean up
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+            // Show success message briefly
+            downloadAllBtn.innerHTML = '✅ Downloaded!';
+            setTimeout(() => {
+                downloadAllBtn.innerHTML = originalText;
+                downloadAllBtn.disabled = false;
+            }, 2000);
+
+        } catch (error) {
+            console.error('Error creating ZIP file:', error);
+            downloadAllBtn.innerHTML = '❌ Error';
+            setTimeout(() => {
+                downloadAllBtn.innerHTML = originalText;
+                downloadAllBtn.disabled = false;
+            }, 2000);
+        }
+    }
+
+    /**
      * Clear all results and reset the interface
      */
     clearResults() {
@@ -744,6 +823,9 @@ class ComicConverter {
         document.getElementById('processingSection').style.display = 'none';
         document.getElementById('resultsSection').style.display = 'none';
         document.getElementById('errorSection').style.display = 'none';
+        
+        // Hide download all button
+        document.getElementById('downloadAllBtn').style.display = 'none';
         
         // Reset file input
         document.getElementById('fileInput').value = '';
@@ -786,9 +868,45 @@ class ComicConverter {
      * Initialize theme system
      */
     initializeTheme() {
-        // Check for saved theme preference or default to light mode
-        const savedTheme = localStorage.getItem('comic-converter-theme') || 'light';
-        this.setTheme(savedTheme);
+        // Check for saved theme preference
+        const savedTheme = localStorage.getItem('comic-converter-theme');
+        
+        if (savedTheme) {
+            // Use saved preference
+            this.setTheme(savedTheme);
+        } else {
+            // Default to OS preference - don't save it to localStorage yet
+            // This allows the CSS media queries to handle the default styling
+            const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const osTheme = prefersDark ? 'dark' : 'light';
+            
+            // Set the theme without saving to localStorage so it remains responsive to OS changes
+            document.documentElement.setAttribute('data-theme', osTheme);
+            
+            // Update theme toggle icon
+            const themeIcon = document.querySelector('.theme-icon');
+            if (themeIcon) {
+                themeIcon.textContent = osTheme === 'light' ? '🌙' : '☀️';
+            }
+            
+            // Listen for OS theme changes when no manual preference is set
+            if (window.matchMedia) {
+                const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+                mediaQuery.addEventListener('change', (e) => {
+                    // Only update if user hasn't manually set a preference
+                    if (!localStorage.getItem('comic-converter-theme')) {
+                        const newOsTheme = e.matches ? 'dark' : 'light';
+                        document.documentElement.setAttribute('data-theme', newOsTheme);
+                        
+                        // Update theme toggle icon
+                        const themeIcon = document.querySelector('.theme-icon');
+                        if (themeIcon) {
+                            themeIcon.textContent = newOsTheme === 'light' ? '🌙' : '☀️';
+                        }
+                    }
+                });
+            }
+        }
     }
 
     /**

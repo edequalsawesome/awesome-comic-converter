@@ -5,6 +5,58 @@
 }
 
 :root {
+    /* Light mode colors (default) */
+    --bg-primary: #f5f5f5;
+    --bg-secondary: #ffffff;
+    --bg-tertiary: #f8f9fa;
+    --text-primary: #333333;
+    --text-secondary: #7f8c8d;
+    --text-tertiary: #95a5a6;
+    --border-color: #e9ecef;
+    --border-hover: #dee2e6;
+    --accent-primary: #3498db;
+    --accent-hover: #2980b9;
+    --success-color: #27ae60;
+    --success-hover: #229954;
+    --error-color: #e74c3c;
+    --error-bg: #fdf2f2;
+    --error-border: #fecaca;
+    --warning-bg: #fff3cd;
+    --warning-border: #ffeaa7;
+    --warning-text: #856404;
+    --shadow: rgba(0, 0, 0, 0.1);
+    --shadow-hover: rgba(52, 152, 219, 0.2);
+}
+
+/* OS dark mode preference */
+@media (prefers-color-scheme: dark) {
+    :root {
+        /* Dark mode colors when OS prefers dark */
+        --bg-primary: #1a1a1a;
+        --bg-secondary: #2d2d2d;
+        --bg-tertiary: #3a3a3a;
+        --text-primary: #e0e0e0;
+        --text-secondary: #b0b0b0;
+        --text-tertiary: #888888;
+        --border-color: #404040;
+        --border-hover: #505050;
+        --accent-primary: #4a9eff;
+        --accent-hover: #3d8bdb;
+        --success-color: #2ecc71;
+        --success-hover: #27ae60;
+        --error-color: #e74c3c;
+        --error-bg: #2d1b1b;
+        --error-border: #4a2c2c;
+        --warning-bg: #2d2a1b;
+        --warning-border: #4a4429;
+        --warning-text: #d4af37;
+        --shadow: rgba(0, 0, 0, 0.3);
+        --shadow-hover: rgba(74, 158, 255, 0.3);
+    }
+}
+
+/* Manual theme override - light mode */
+[data-theme="light"] {
     /* Light mode colors */
     --bg-primary: #f5f5f5;
     --bg-secondary: #ffffff;
@@ -28,6 +80,7 @@
     --shadow-hover: rgba(52, 152, 219, 0.2);
 }
 
+/* Manual theme override - dark mode */
 [data-theme="dark"] {
     /* Dark mode colors */
     --bg-primary: #1a1a1a;
@@ -362,6 +415,38 @@ main {
     background: var(--success-hover);
 }
 
+.bulk-actions {
+    display: flex;
+    gap: 15px;
+    margin-top: 20px;
+    flex-wrap: wrap;
+}
+
+.download-all-btn {
+    background: var(--success-color);
+    color: white;
+    border: none;
+    padding: 12px 24px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 1rem;
+    transition: background-color 0.3s ease;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.download-all-btn:hover {
+    background: var(--success-hover);
+    transform: translateY(-1px);
+}
+
+.download-all-btn:disabled {
+    background: var(--text-tertiary);
+    cursor: not-allowed;
+    transform: none;
+}
+
 .clear-btn {
     background: var(--accent-primary);
     color: white;
@@ -370,7 +455,6 @@ main {
     border-radius: 6px;
     cursor: pointer;
     font-size: 1rem;
-    margin-top: 20px;
     transition: background-color 0.3s ease;
 }
 
