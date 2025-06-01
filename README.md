@@ -228,7 +228,7 @@ Contributions are welcome! Please feel free to submit issues, feature requests, 
 
 ## License
 
-This project is open source. Please check individual dependencies for their respective licenses.
+This project is licensed under the GPL v3 License - see the LICENSE.md file for details. Please check individual dependencies for their respective licenses.
 
 ## Support
 
