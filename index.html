@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Comic Converter - AZW3 to CBZ</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="header-content">
+                <div class="title-section">
+                    <h1>Comic Converter</h1>
+                    <p>Convert DRM-free Amazon comic books (AZW3) to CBZ format</p>
+                </div>
+                <button class="theme-toggle" id="themeToggle" aria-label="Toggle dark mode">
+                    <span class="theme-icon">🌙</span>
+                </button>
+            </div>
+        </header>
+
+        <main>
+            <div class="upload-section">
+                <div class="drop-zone" id="dropZone">
+                    <div class="drop-zone-content">
+                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="7,10 12,15 17,10"></polyline>
+                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                        <h3>Drop AZW3 files or folders here</h3>
+                        <p>
+                            <button type="button" class="browse-btn" id="browseBtn">browse files</button> or
+                            <button type="button" class="browse-btn" id="browseFolderBtn">browse folders</button>
+                        </p>
+                        <small>Supports AZW3 files and folders with AZW3 + metadata.opf + cover.jpg</small>
+                    </div>
+                </div>
+                <input type="file" id="fileInput" accept=".azw3" multiple hidden>
+                <input type="file" id="folderInput" webkitdirectory multiple hidden>
+            </div>
+
+            <div class="instructions">
+                <h3>Instructions</h3>
+                <ul>
+                    <li><strong>Files:</strong> Select DRM-free AZW3 comic book files from Amazon</li>
+                    <li><strong>Folders:</strong> Select folders containing AZW3 + metadata.opf + cover.jpg</li>
+                    <li>All processing happens in your browser for complete privacy</li>
+                    <li>Images are extracted at highest available resolution</li>
+                    <li>Metadata is extracted from .opf files when available</li>
+                    <li>Cover images are included in the final CBZ</li>
+                    <li>Output CBZ files maintain proper reading order</li>
+                </ul>
+            </div>
+
+            <div class="processing-section" id="processingSection" style="display: none;">
+                <h3>Processing Files</h3>
+                <div class="file-list" id="fileList"></div>
+            </div>
+
+            <div class="results-section" id="resultsSection" style="display: none;">
+                <h3>Conversion Complete</h3>
+                <div class="download-list" id="downloadList"></div>
+                <button type="button" class="clear-btn" id="clearBtn">Process More Files</button>
+            </div>
+
+            <div class="error-section" id="errorSection" style="display: none;">
+                <h3>Errors</h3>
+                <div class="error-list" id="errorList"></div>
+            </div>
+        </main>
+
+        <footer>
+            <p>This tool processes files locally in your browser. No data is sent to external servers.</p>
+        </footer>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="azw3-parser.js"></script>
+    <script src="opf-parser.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
