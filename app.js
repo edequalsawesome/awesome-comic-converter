@@ -77,33 +77,26 @@ class ComicConverter {
         e.stopPropagation();
         document.getElementById('dropZone').classList.remove('drag-over');
         
-        // Handle both files and directory entries
-        const items = Array.from(e.dataTransfer.items);
-        const files = [];
+        console.log('Drop event triggered');
+        console.log('DataTransfer items:', e.dataTransfer.items.length);
+        console.log('DataTransfer files:', e.dataTransfer.files.length);
         
-        // Process DataTransferItems to handle folders properly
-        for (const item of items) {
-            if (item.kind === 'file') {
-                const entry = item.webkitGetAsEntry();
-                if (entry) {
-                    if (entry.isDirectory) {
-                        // Handle directory
-                        const dirFiles = await this.readDirectory(entry);
-                        files.push(...dirFiles);
-                    } else {
-                        // Handle individual file
-                        const file = item.getAsFile();
-                        files.push(file);
-                    }
-                } else {
-                    // Fallback for browsers that don't support webkitGetAsEntry
-                    const file = item.getAsFile();
-                    if (file) files.push(file);
-                }
-            }
-        }
+        // Check if we can use the File System Access API approach
+        const files = await this.processDroppedItems(e.dataTransfer);
         
-        if (files.length === 0) {
+        console.log(`Total files collected: ${files.length}`);
+        
+        // Check if we had items but couldn't process most of them
+        const itemCount = e.dataTransfer.items.length;
+        if (files.length > 0 && files.length < itemCount) {
+            const processedFolders = Math.ceil(files.length / 4); // Assuming ~4 files per folder
+            const totalFolders = itemCount;
+            this.showError(
+                'Multiple Folder Limitation', 
+                `Only ${processedFolders} of ${totalFolders} folders could be processed due to browser limitations. Please drag folders one at a time or use the "browse folders" button for multiple folders.`
+            );
+            // Continue processing the files we did get
+        } else if (files.length === 0) {
             this.showError('No valid files found', 'Please drop AZW3 files or folders containing AZW3 + metadata files');
             return;
         }
@@ -145,42 +138,163 @@ class ComicConverter {
     }
 
     /**
+     * Process dropped items with better handling for multiple folders
+     */
+    async processDroppedItems(dataTransfer) {
+        const items = Array.from(dataTransfer.items);
+        const files = [];
+        
+        console.log('Processing items:', items.length);
+        
+        // Process all items, but handle the webkitGetAsEntry() limitation
+        // where only some items return valid entries
+        const processPromises = [];
+        
+        for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            console.log(`Item ${i}:`, {
+                kind: item.kind,
+                type: item.type,
+                webkitGetAsEntry: !!item.webkitGetAsEntry
+            });
+            
+            if (item.kind === 'file') {
+                // Try to get entry, but don't fail if it returns null
+                const processItem = async () => {
+                    try {
+                        const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+                        console.log(`Entry ${i}:`, entry ? {
+                            name: entry.name,
+                            isDirectory: entry.isDirectory,
+                            isFile: entry.isFile
+                        } : 'No entry');
+                        
+                        if (entry) {
+                            if (entry.isDirectory) {
+                                console.log(`Reading directory: ${entry.name}`);
+                                const dirFiles = await this.readDirectory(entry);
+                                console.log(`Found ${dirFiles.length} files in directory ${entry.name}`);
+                                return dirFiles;
+                            } else {
+                                // Handle individual file
+                                const file = item.getAsFile();
+                                console.log(`Individual file: ${file?.name}`);
+                                return file ? [file] : [];
+                            }
+                        } else {
+                            // webkitGetAsEntry() returned null, but this could still be a folder
+                            // Unfortunately, we can't access folder contents without a valid entry
+                            console.log(`Item ${i} has no entry - likely a folder that couldn't be processed`);
+                            return [];
+                        }
+                    } catch (error) {
+                        console.error(`Error processing item ${i}:`, error);
+                        return [];
+                    }
+                };
+                
+                processPromises.push(processItem());
+            }
+        }
+        
+        // Wait for all items to be processed
+        const results = await Promise.all(processPromises);
+        
+        // Flatten results
+        for (const result of results) {
+            files.push(...result);
+        }
+        
+        // Also check dataTransfer.files as a fallback for individual file drops
+        const dataTransferFiles = Array.from(dataTransfer.files);
+        console.log(`Checking ${dataTransferFiles.length} files for direct file drops`);
+        
+        for (const file of dataTransferFiles) {
+            console.log(`File: ${file.name}, webkitRelativePath: "${file.webkitRelativePath || 'empty'}"`);
+            
+            // Add files that have webkitRelativePath (came from folder selection)
+            // or if we haven't processed any entries yet (direct file drop)
+            if (file.webkitRelativePath && file.webkitRelativePath.includes('/')) {
+                files.push(file);
+                console.log(`Added file from folder structure: ${file.name}`);
+            } else if (files.length === 0 && !file.webkitRelativePath) {
+                // Only add direct files if we haven't found any through webkitGetAsEntry
+                files.push(file);
+                console.log(`Added direct file: ${file.name}`);
+            }
+        }
+        
+        return files;
+    }
+
+    /**
      * Read directory contents recursively
      */
     async readDirectory(dirEntry, path = '') {
+        console.log(`Reading directory: ${dirEntry.name}, path: ${path}`);
         const files = [];
         const reader = dirEntry.createReader();
         
-        return new Promise((resolve) => {
-            const readEntries = () => {
-                reader.readEntries(async (entries) => {
-                    if (entries.length === 0) {
-                        resolve(files);
-                        return;
-                    }
-                    
-                    for (const entry of entries) {
-                        const fullPath = path ? `${path}/${entry.name}` : entry.name;
-                        
-                        if (entry.isFile) {
-                            const file = await this.getFileFromEntry(entry);
-                            if (file) {
-                                // Use a safer approach to track file paths
-                                file._syntheticPath = `${dirEntry.name}/${fullPath}`;
-                                files.push(file);
-                            }
-                        } else if (entry.isDirectory) {
-                            const subFiles = await this.readDirectory(entry, fullPath);
-                            files.push(...subFiles);
+        const readAllEntries = () => {
+            return new Promise((resolve, reject) => {
+                const entries = [];
+                let batchCount = 0;
+                
+                const readBatch = () => {
+                    console.log(`Reading batch ${batchCount} for directory ${dirEntry.name}`);
+                    reader.readEntries((batchEntries) => {
+                        console.log(`Batch ${batchCount} returned ${batchEntries.length} entries`);
+                        if (batchEntries.length === 0) {
+                            console.log(`Finished reading directory ${dirEntry.name}, total entries: ${entries.length}`);
+                            resolve(entries);
+                        } else {
+                            entries.push(...batchEntries);
+                            batchCount++;
+                            readBatch(); // Continue reading
                         }
-                    }
-                    
-                    readEntries(); // Continue reading
-                });
-            };
+                    }, (error) => {
+                        console.error(`Error reading batch ${batchCount} for directory ${dirEntry.name}:`, error);
+                        reject(error);
+                    });
+                };
+                
+                readBatch();
+            });
+        };
+        
+        try {
+            const allEntries = await readAllEntries();
+            console.log(`Processing ${allEntries.length} entries from directory ${dirEntry.name}`);
             
-            readEntries();
-        });
+            // Process all entries
+            for (const entry of allEntries) {
+                const fullPath = path ? `${path}/${entry.name}` : entry.name;
+                console.log(`Processing entry: ${entry.name}, isFile: ${entry.isFile}, isDirectory: ${entry.isDirectory}`);
+                
+                if (entry.isFile) {
+                    const file = await this.getFileFromEntry(entry);
+                    if (file) {
+                        console.log(`Added file: ${file.name}`);
+                        // Use a safer approach to track file paths
+                        file._syntheticPath = `${dirEntry.name}/${fullPath}`;
+                        files.push(file);
+                    } else {
+                        console.log(`Failed to get file from entry: ${entry.name}`);
+                    }
+                } else if (entry.isDirectory) {
+                    console.log(`Recursing into subdirectory: ${entry.name}`);
+                    const subFiles = await this.readDirectory(entry, fullPath);
+                    console.log(`Subdirectory ${entry.name} returned ${subFiles.length} files`);
+                    files.push(...subFiles);
+                }
+            }
+            
+            console.log(`Directory ${dirEntry.name} final file count: ${files.length}`);
+            return files;
+        } catch (error) {
+            console.error(`Error reading directory ${dirEntry.name}:`, error);
+            throw error;
+        }
     }
 
     /**

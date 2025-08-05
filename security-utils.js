@@ -24,7 +24,13 @@ class SecurityUtils {
             azw3: [
                 [0x54, 0x50, 0x5A, 0x33], // TPZ3
                 [0x42, 0x4F, 0x4F, 0x4B], // BOOK
-                [0x4D, 0x4F, 0x42, 0x49]  // MOBI
+                [0x4D, 0x4F, 0x42, 0x49], // MOBI
+                // Additional AZW3/Palm database signatures
+                [0x54, 0x45, 0x58, 0x54], // TEXT (Palm text)
+                [0x41, 0x5A, 0x57, 0x33], // AZW3 (literal)
+                [0x41, 0x5A, 0x57, 0x31], // AZW1
+                [0x41, 0x5A, 0x57, 0x52], // AZWR
+                [0x54, 0x50, 0x5A, 0x30]  // TPZ0
             ],
             jpg: [[0xFF, 0xD8, 0xFF]],
             png: [[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]],
@@ -112,6 +118,10 @@ class SecurityUtils {
             throw new Error('File is too small or corrupted');
         }
         
+        if (expectedType === 'azw3') {
+            return this.validateAZW3Structure(arrayBuffer);
+        }
+        
         const uint8Array = new Uint8Array(arrayBuffer, 0, Math.min(16, arrayBuffer.byteLength));
         const signatures = this.validFileSignatures[expectedType];
         
@@ -129,6 +139,82 @@ class SecurityUtils {
         }
         
         return true;
+    }
+
+    /**
+     * Validate AZW3 file structure (more comprehensive than signature check)
+     */
+    validateAZW3Structure(arrayBuffer) {
+        if (arrayBuffer.byteLength < 78) {
+            throw new Error('File too small to be a valid AZW3 file');
+        }
+        
+        try {
+            const dataView = new DataView(arrayBuffer);
+            
+            // Check if it has basic Palm database structure
+            // Palm header is 78 bytes, check key fields
+            
+            // Check database type at offset 60 (4 bytes)
+            const type = String.fromCharCode(
+                dataView.getUint8(60),
+                dataView.getUint8(61),
+                dataView.getUint8(62),
+                dataView.getUint8(63)
+            );
+            
+            // Check creator at offset 64 (4 bytes)
+            const creator = String.fromCharCode(
+                dataView.getUint8(64),
+                dataView.getUint8(65),
+                dataView.getUint8(66),
+                dataView.getUint8(67)
+            );
+            
+            // Get record count at offset 76
+            const recordCount = dataView.getUint16(76, false);
+            
+            // Validate Palm database structure
+            const isValidPalmDB = recordCount > 0 && recordCount < 65535;
+            const isKnownType = ['BOOK', 'MOBI', 'TEXT', 'AZW3', 'AZW1', 'AZWR'].includes(type) ||
+                              ['MOBI', 'AZW3', 'BOOK', 'TPZ3', 'TPZ0', 'TEXT'].includes(creator);
+            
+            if (!isValidPalmDB) {
+                throw new Error('Invalid Palm database structure');
+            }
+            
+            // If we have a valid Palm database structure, check for MOBI header in first record
+            if (recordCount > 0 && arrayBuffer.byteLength > 94) { // 78 + 8 + 8 minimum
+                const firstRecordOffset = dataView.getUint32(78, false);
+                
+                if (firstRecordOffset > 0 && firstRecordOffset < arrayBuffer.byteLength - 20) {
+                    // Look for MOBI header after PalmDOC header (16 bytes)
+                    const mobiOffset = firstRecordOffset + 16;
+                    if (mobiOffset + 4 <= arrayBuffer.byteLength) {
+                        const mobiSignature = String.fromCharCode(
+                            dataView.getUint8(mobiOffset),
+                            dataView.getUint8(mobiOffset + 1),
+                            dataView.getUint8(mobiOffset + 2),
+                            dataView.getUint8(mobiOffset + 3)
+                        );
+                        
+                        if (mobiSignature === 'MOBI') {
+                            return true; // Valid MOBI/AZW3 file
+                        }
+                    }
+                }
+            }
+            
+            // If no MOBI header found but has valid Palm structure and known type, allow it
+            if (isKnownType) {
+                return true;
+            }
+            
+            throw new Error('Not a valid AZW3/MOBI file');
+            
+        } catch (error) {
+            throw new Error(`Invalid AZW3 file signature: ${error.message}`);
+        }
     }
 
     /**
