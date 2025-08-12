@@ -8,6 +8,9 @@ class ComicConverter {
         this.securityUtils = new SecurityUtils();
         this.parser = new AZW3Parser();
         this.opfParser = new OPFParser();
+        this.zipWorker = null;
+        this.workerRequestId = 0;
+        this.workerCallbacks = new Map();
         this.processingFiles = new Map();
         this.completedFiles = new Map();
         this.errors = [];
@@ -15,8 +18,46 @@ class ComicConverter {
         // Setup global error handling
         this.securityUtils.setupGlobalErrorHandler();
         
+        this.initializeZipWorker();
         this.initializeEventListeners();
         this.initializeTheme();
+    }
+
+    /**
+     * Initialize Zip Worker
+     */
+    initializeZipWorker() {
+        try {
+            this.zipWorker = new Worker('zip-worker.js');
+            this.zipWorker.onmessage = (e) => {
+                const { id, ok, result, error } = e.data || {};
+                const cb = this.workerCallbacks.get(id);
+                if (!cb) return;
+                this.workerCallbacks.delete(id);
+                if (ok) {
+                    cb.resolve(result);
+                } else {
+                    cb.reject(new Error(error || 'Worker error'));
+                }
+            };
+        } catch (error) {
+            console.warn('Zip Worker initialization failed, falling back to main thread:', error);
+            this.zipWorker = null;
+        }
+    }
+
+    /**
+     * Post a request to the worker
+     */
+    postToWorker(action, payload) {
+        if (!this.zipWorker) {
+            return Promise.reject(new Error('Worker unavailable'));
+        }
+        const id = ++this.workerRequestId;
+        return new Promise((resolve, reject) => {
+            this.workerCallbacks.set(id, { resolve, reject });
+            this.zipWorker.postMessage({ id, action, payload });
+        });
     }
 
     /**
@@ -30,6 +71,7 @@ class ComicConverter {
         const browseFolderBtn = document.getElementById('browseFolderBtn');
         const clearBtn = document.getElementById('clearBtn');
         const downloadAllBtn = document.getElementById('downloadAllBtn');
+        const saveAllBtn = document.getElementById('saveAllBtn');
         const themeToggle = document.getElementById('themeToggle');
 
         // File input events
@@ -39,6 +81,9 @@ class ComicConverter {
         browseFolderBtn.addEventListener('click', () => folderInput.click());
         clearBtn.addEventListener('click', () => this.clearResults());
         downloadAllBtn.addEventListener('click', () => this.downloadAllFiles());
+        if (saveAllBtn) {
+            saveAllBtn.addEventListener('click', () => this.saveAllToFolder());
+        }
         themeToggle.addEventListener('click', () => this.toggleTheme());
 
         // Drag and drop events
@@ -488,7 +533,7 @@ class ComicConverter {
             // Update status
             this.updateFileStatus(fileId, `Found ${parsedData.images.length} images, creating CBZ...`, 70);
             
-            // Create CBZ file with enhanced metadata
+            // Create CBZ file with enhanced metadata (offload to worker when available)
             const cbzBlob = await this.createEnhancedCBZ(parsedData, azw3File.name, coverFile);
             
             // Update status
@@ -545,7 +590,7 @@ class ComicConverter {
             // Update status
             this.updateFileStatus(fileId, `Found ${parsedData.images.length} images, creating CBZ...`, 60);
             
-            // Create CBZ file
+            // Create CBZ file (offload to worker when available)
             const cbzBlob = await this.createCBZ(parsedData, file.name);
             
             // Update status
@@ -574,14 +619,6 @@ class ComicConverter {
      * Create CBZ file from parsed data
      */
     async createCBZ(parsedData, originalFileName) {
-        const zip = new JSZip();
-        
-        // Add images to zip
-        for (const image of parsedData.images) {
-            zip.file(image.filename, image.data);
-        }
-        
-        // Add metadata file
         const metadata = {
             title: parsedData.metadata.title,
             author: parsedData.metadata.author,
@@ -590,46 +627,37 @@ class ComicConverter {
             convertedFrom: originalFileName,
             convertedAt: new Date().toISOString()
         };
-        
+
+        // Try worker
+        try {
+            const { blob } = await this.postToWorker('createCBZ', {
+                images: parsedData.images.map(img => ({ filename: img.filename, data: img.data })),
+                metadata,
+                store: true
+            });
+            return blob;
+        } catch (_) {
+            // Fallback to main thread
+        }
+
+        const zip = new JSZip();
+        for (const image of parsedData.images) {
+            zip.file(image.filename, image.data);
+        }
         zip.file('metadata.json', JSON.stringify(metadata, null, 2));
-        
-        // Generate CBZ file
-        const cbzBlob = await zip.generateAsync({
-            type: 'blob',
-            compression: 'STORE', // No compression to preserve image quality
-            compressionOptions: {
-                level: 0
-            }
-        });
-        
-        return cbzBlob;
+        return await zip.generateAsync({ type: 'blob', compression: 'STORE', compressionOptions: { level: 0 } });
     }
 
     /**
      * Create enhanced CBZ file with OPF metadata and cover
      */
     async createEnhancedCBZ(parsedData, originalFileName, coverFile) {
-        const zip = new JSZip();
-        
-        // Add cover image first if available
-        if (coverFile) {
-            const coverData = await this.readFileAsArrayBuffer(coverFile);
-            const coverExtension = coverFile.name.split('.').pop().toLowerCase();
-            zip.file(`000_cover.${coverExtension}`, coverData);
-        }
-        
-        // Add images to zip
-        for (const image of parsedData.images) {
-            zip.file(image.filename, image.data);
-        }
-        
         // Generate ComicInfo.xml from OPF metadata
         const comicInfoXml = this.opfParser.generateComicInfo(
             parsedData.metadata,
             parsedData.images.length + (coverFile ? 1 : 0)
         );
-        zip.file('ComicInfo.xml', comicInfoXml);
-        
+
         // Add enhanced metadata file
         const metadata = {
             title: parsedData.metadata.title,
@@ -649,19 +677,39 @@ class ComicConverter {
             convertedAt: new Date().toISOString(),
             custom: parsedData.metadata.custom
         };
-        
-        zip.file('metadata.json', JSON.stringify(metadata, null, 2));
-        
-        // Generate CBZ file
-        const cbzBlob = await zip.generateAsync({
-            type: 'blob',
-            compression: 'STORE', // No compression to preserve image quality
-            compressionOptions: {
-                level: 0
+
+        // Try worker
+        try {
+            let coverPayload = null;
+            if (coverFile) {
+                const coverData = await this.readFileAsArrayBuffer(coverFile);
+                const ext = coverFile.name.split('.').pop().toLowerCase();
+                coverPayload = { filename: `000_cover.${ext}`, data: coverData };
             }
-        });
-        
-        return cbzBlob;
+            const { blob } = await this.postToWorker('createEnhancedCBZ', {
+                images: parsedData.images.map(img => ({ filename: img.filename, data: img.data })),
+                comicInfoXml,
+                cover: coverPayload,
+                metadata,
+                store: true
+            });
+            return blob;
+        } catch (_) {
+            // Fallback to main thread
+        }
+
+        const zip = new JSZip();
+        if (coverFile) {
+            const coverData = await this.readFileAsArrayBuffer(coverFile);
+            const coverExtension = coverFile.name.split('.').pop().toLowerCase();
+            zip.file(`000_cover.${coverExtension}`, coverData);
+        }
+        for (const image of parsedData.images) {
+            zip.file(image.filename, image.data);
+        }
+        zip.file('ComicInfo.xml', comicInfoXml);
+        zip.file('metadata.json', JSON.stringify(metadata, null, 2));
+        return await zip.generateAsync({ type: 'blob', compression: 'STORE', compressionOptions: { level: 0 } });
     }
 
     /**
@@ -862,13 +910,61 @@ class ComicConverter {
         
         // Show/hide download all button based on number of files
         const downloadAllBtn = document.getElementById('downloadAllBtn');
+        const saveAllBtn = document.getElementById('saveAllBtn');
         if (this.completedFiles.size > 1) {
             downloadAllBtn.style.display = 'flex';
+            // Show Save All only if File System Access API is available
+            if (window.showDirectoryPicker) {
+                saveAllBtn.style.display = 'flex';
+            } else {
+                saveAllBtn.style.display = 'none';
+            }
         } else {
             downloadAllBtn.style.display = 'none';
+            if (saveAllBtn) saveAllBtn.style.display = 'none';
         }
         
         resultsSection.style.display = 'block';
+    }
+
+    /**
+     * Save all CBZ files directly to a chosen folder (File System Access API)
+     */
+    async saveAllToFolder() {
+        if (!window.showDirectoryPicker) {
+            this.showError('Not supported', 'Your browser does not support saving to a folder. Use Download All instead.');
+            return;
+        }
+        if (this.completedFiles.size === 0) return;
+
+        const saveAllBtn = document.getElementById('saveAllBtn');
+        const originalText = saveAllBtn.innerHTML;
+        try {
+            saveAllBtn.disabled = true;
+            saveAllBtn.innerHTML = '💾 Saving...';
+
+            const dirHandle = await window.showDirectoryPicker();
+            for (const [_, fileData] of this.completedFiles) {
+                const cbzFileName = fileData.originalName.replace(/\.azw3$/i, '.cbz');
+                const fileHandle = await dirHandle.getFileHandle(cbzFileName, { create: true });
+                const writable = await fileHandle.createWritable();
+                await writable.write(fileData.cbzBlob);
+                await writable.close();
+            }
+
+            saveAllBtn.innerHTML = '✅ Saved!';
+            setTimeout(() => {
+                saveAllBtn.innerHTML = originalText;
+                saveAllBtn.disabled = false;
+            }, 1500);
+        } catch (error) {
+            console.error('Save All failed:', error);
+            saveAllBtn.innerHTML = '❌ Error';
+            setTimeout(() => {
+                saveAllBtn.innerHTML = originalText;
+                saveAllBtn.disabled = false;
+            }, 1500);
+        }
     }
 
     /**
@@ -943,14 +1039,19 @@ class ComicConverter {
             // Update button text
             downloadAllBtn.innerHTML = '📦 Generating ZIP...';
 
-            // Generate the ZIP file (STORE to avoid recompressing CBZ files)
-            const zipBlob = await zip.generateAsync({
-                type: 'blob',
-                compression: 'STORE',
-                compressionOptions: {
-                    level: 0
+            // Generate the ZIP file (STORE to avoid recompressing CBZ files). Try worker first.
+            let zipBlob;
+            try {
+                const entries = [];
+                for (const [_, fileData] of this.completedFiles) {
+                    const name = fileData.originalName.replace(/\.azw3$/i, '.cbz');
+                    entries.push({ name, data: fileData.cbzBlob });
                 }
-            });
+                const { blob } = await this.postToWorker('createOuterZip', { entries, store: true });
+                zipBlob = blob;
+            } catch (_) {
+                zipBlob = await zip.generateAsync({ type: 'blob', compression: 'STORE', compressionOptions: { level: 0 } });
+            }
 
             // Create download link
             const timestamp = new Date().toISOString().slice(0, 19).replace(/[:-]/g, '');
