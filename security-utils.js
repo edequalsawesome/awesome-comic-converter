@@ -16,7 +16,9 @@ class SecurityUtils {
         
         // Rate limiting
         this.processingQueue = [];
-        this.maxConcurrentProcessing = 3;
+        // CPU-aware concurrency: use (cores - 1), clamped between 2 and 8
+        const coreCount = (typeof navigator !== 'undefined' && navigator && navigator.hardwareConcurrency) ? navigator.hardwareConcurrency : 4;
+        this.maxConcurrentProcessing = Math.max(2, Math.min(8, coreCount - 1));
         this.currentProcessing = 0;
         
         // Valid file signatures

@@ -175,8 +175,8 @@ class AZW3Parser {
                 
                 if (recordSize < 10) continue; // Too small to be an image
                 
-                // Extract record data
-                const recordData = uint8Array.slice(record.offset, record.offset + recordSize);
+                // Extract record data without copying to reduce memory pressure
+                const recordData = uint8Array.subarray(record.offset, record.offset + recordSize);
                 
                 // Check if this looks like an image
                 const imageInfo = this.identifyImage(recordData);
@@ -209,31 +209,34 @@ class AZW3Parser {
         
         // Check for JPEG
         if (data[0] === 0xFF && data[1] === 0xD8) {
+            const dims = this.getJpegDimensions(data) || { width: 0, height: 0 };
             return {
                 format: 'JPEG',
                 extension: 'jpg',
-                width: this.getJpegDimensions(data)?.width || 0,
-                height: this.getJpegDimensions(data)?.height || 0
+                width: dims.width,
+                height: dims.height
             };
         }
         
         // Check for PNG
         if (data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4E && data[3] === 0x47) {
+            const dims = this.getPngDimensions(data) || { width: 0, height: 0 };
             return {
                 format: 'PNG',
                 extension: 'png',
-                width: this.getPngDimensions(data)?.width || 0,
-                height: this.getPngDimensions(data)?.height || 0
+                width: dims.width,
+                height: dims.height
             };
         }
         
         // Check for GIF
         if (data[0] === 0x47 && data[1] === 0x49 && data[2] === 0x46) {
+            const dims = this.getGifDimensions(data) || { width: 0, height: 0 };
             return {
                 format: 'GIF',
                 extension: 'gif',
-                width: this.getGifDimensions(data)?.width || 0,
-                height: this.getGifDimensions(data)?.height || 0
+                width: dims.width,
+                height: dims.height
             };
         }
         

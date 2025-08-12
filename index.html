@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; media-src 'self'; frame-src 'none'; worker-src 'self'; child-src 'none'; form-action 'self'; base-uri 'self';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; media-src 'self'; frame-src 'none'; worker-src 'self'; child-src 'none'; form-action 'self'; base-uri 'self';">
     <meta http-equiv="X-Content-Type-Options" content="nosniff">
     <meta http-equiv="X-Frame-Options" content="DENY">
     <meta http-equiv="X-XSS-Protection" content="1; mode=block">
@@ -27,9 +27,9 @@
 
         <main>
             <div class="upload-section">
-                <div class="drop-zone" id="dropZone">
+                <div class="drop-zone" id="dropZone" role="button" tabindex="0" aria-label="Drop AZW3 files or press Enter to browse files">
                     <div class="drop-zone-content">
-                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                             <polyline points="7,10 12,15 17,10"></polyline>
                             <line x1="12" y1="15" x2="12" y2="3"></line>
@@ -42,7 +42,9 @@
                         <small>Supports AZW3 files and folders with AZW3 + metadata.opf + cover.jpg</small>
                     </div>
                 </div>
+                <label for="fileInput" class="sr-only">Choose AZW3 files</label>
                 <input type="file" id="fileInput" accept=".azw3" multiple hidden>
+                <label for="folderInput" class="sr-only">Choose folders containing AZW3 and metadata</label>
                 <input type="file" id="folderInput" webkitdirectory multiple hidden>
             </div>
 

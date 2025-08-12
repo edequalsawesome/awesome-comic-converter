@@ -45,6 +45,13 @@ class ComicConverter {
         dropZone.addEventListener('dragover', this.handleDragOver.bind(this));
         dropZone.addEventListener('dragleave', this.handleDragLeave.bind(this));
         dropZone.addEventListener('drop', this.handleDrop.bind(this));
+        // Keyboard activation for accessibility
+        dropZone.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                fileInput.click();
+            }
+        });
 
         // Prevent default drag behaviors on the document
         document.addEventListener('dragover', (e) => e.preventDefault());
@@ -715,6 +722,9 @@ class ComicConverter {
         
         // Create status
         const status = this.securityUtils.createSafeElement('div', 'Preparing...', 'status processing');
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
+        status.setAttribute('aria-atomic', 'true');
         status.id = `status-${fileId}`;
         
         fileItem.appendChild(title);
@@ -743,6 +753,9 @@ class ComicConverter {
         
         // Create status
         const status = this.securityUtils.createSafeElement('div', 'Preparing...', 'status processing');
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
+        status.setAttribute('aria-atomic', 'true');
         status.id = `status-${fileId}`;
         
         fileItem.appendChild(title);
@@ -930,12 +943,12 @@ class ComicConverter {
             // Update button text
             downloadAllBtn.innerHTML = '📦 Generating ZIP...';
 
-            // Generate the ZIP file
+            // Generate the ZIP file (STORE to avoid recompressing CBZ files)
             const zipBlob = await zip.generateAsync({
                 type: 'blob',
-                compression: 'DEFLATE',
+                compression: 'STORE',
                 compressionOptions: {
-                    level: 6
+                    level: 0
                 }
             });
 
