@@ -10,29 +10,19 @@ Awesome Comic Converter is a client-side web application that converts DRM-free 
 
 ### Local Development Server
 ```bash
-# Using Python 3 (recommended)
+# Serves only on localhost
 npm run start
-# or
-python -m http.server 8000
-
-# Using Node.js http-server
-npm run serve
-# or
-npx http-server -p 8000
-
-# Using PHP
-php -S localhost:8000
 ```
 
-Then open `http://localhost:8000` in your browser.
+Then open `http://127.0.0.1:8000` in a current Chromium browser. The app uses modern JavaScript syntax and has not been tested against legacy browser versions.
 
 ### Testing
 ```bash
-npm run test
-# Opens test.html in the default browser
+npm test
+npm run lint
 ```
 
-Note: There is no formal test framework - testing is done manually by opening test.html.
+Tests use Node's built-in runner (Node 18+). Browser QA remains useful for picker, cover, and download flows.
 
 ## Architecture
 
@@ -58,14 +48,14 @@ The application follows a modular class-based architecture:
 - **SecurityUtils** (`security-utils.js`): Security and validation
   - File type validation using magic bytes
   - Memory usage tracking and limits
-  - Rate limiting and batch processing controls
+  - File and batch validation helpers
   - Input sanitization and XSS prevention
 
 ### File Processing Flow
 
 1. User drops files/folders or uses file browser
 2. SecurityUtils validates file types and sizes
-3. Files are queued and processed with rate limiting
+3. Each AZW3 is processed sequentially
 4. AZW3Parser extracts images from AZW3 files
 5. OPFParser extracts metadata from optional OPF files
 6. Images and metadata are packaged into CBZ using JSZip
@@ -75,7 +65,7 @@ The application follows a modular class-based architecture:
 
 - Content Security Policy (CSP) headers in HTML
 - File type validation using magic bytes
-- Memory usage limits (1GB max, 500MB per file)
+- Per-file and batch-size validation plus a 512 MiB retained-output budget
 - Input sanitization for all user data
 - No server communication - entirely client-side
 
@@ -90,15 +80,13 @@ The application follows a modular class-based architecture:
 
 ## External Dependencies
 
-- **JSZip**: Loaded from CDN for creating CBZ archives
-  - CDN: `https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js`
+- **JSZip**: bundled at `vendor/jszip.min.js` for local archive creation
   - Used with STORE compression to preserve image quality
 
 ## Browser Compatibility
 
-- Chrome 60+, Firefox 55+, Safari 11+, Edge 79+
-- Requires File API, Blob/ArrayBuffer, and modern JavaScript features
-- No Internet Explorer support
+- Tested in current Chromium.
+- Requires File API, Blob/ArrayBuffer, Web Workers, and modern JavaScript syntax.
 
 ## Development Guidelines
 
@@ -120,10 +108,8 @@ The application follows a modular class-based architecture:
 
 ### Performance Notes
 
-- Large files (>100MB) require significant browser memory
-- Processing is done sequentially to prevent memory exhaustion
-- Use rate limiting (max 3 concurrent files) for batch operations
-- Consider memory cleanup after processing large files
+- Large files and archive creation require transient browser memory beyond the retained-output cap.
+- Processing is sequential, and completed downloads are capped at 512 MiB until saved or cleared.
 
 ## File Structure Conventions
 
