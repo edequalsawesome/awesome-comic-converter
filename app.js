@@ -271,12 +271,12 @@ class ComicConverter {
         } catch (_) { warnings.push('Ignored cover sidecar that could not be read.'); return null; }
     }
 
-    async archivePrepared(prepared, outputName) {
+    async archivePrepared(prepared, outputName, credit = 0) {
         const payload = prepared.archive.payload;
         let blob;
         try { ({ blob } = await this.postToWorker('createArchive', payload)); }
         catch (_) { blob = await this.createArchiveFallback(payload); }
-        if (this.retainedBytes + blob.size > this.maxRetainedBytes) throw new Error('Retained output limit reached. Save or clear completed results before converting more.');
+        if (this.retainedBytes - credit + blob.size > this.maxRetainedBytes) throw new Error('Retained output limit reached. Save or clear completed results before converting more.');
         const preview = await this.createPreview(prepared.selected[0]);
         const warnings = [...new Set([...prepared.job.warnings.filter(warning => warning !== 'Cover preview unavailable; the archive is unchanged.'), ...(preview.warning ? [preview.warning] : [])])];
         return {
@@ -320,8 +320,8 @@ class ComicConverter {
         return { estimate, payload: { images: selected.map(image => ({ filename: image.filename, data: image.data })), comicInfoXml, metadataJson, store: true } };
     }
 
-    ensureBudget(estimate) {
-        if (this.retainedBytes + estimate > this.maxRetainedBytes) throw new Error('Retained output limit reached. Save or clear completed results before converting more.');
+    ensureBudget(estimate, credit = 0) {
+        if (this.retainedBytes - credit + estimate > this.maxRetainedBytes) throw new Error('Retained output limit reached. Save or clear completed results before converting more.');
     }
 
     async rebuildResult(id, settings, focusTarget = 'cover') {
@@ -331,8 +331,8 @@ class ComicConverter {
             try {
                 const job = { file: current.sourceFile, opf: current.opfFile, cover: current.coverFile, warnings: [...current.warnings] };
                 const prepared = await this.prepareResult(job, settings, current.metadata);
-                this.ensureBudget(prepared.estimate);
-                const next = await this.archivePrepared(prepared, current.outputName);
+                this.ensureBudget(prepared.estimate, current.cbzBlob.size);
+                const next = await this.archivePrepared(prepared, current.outputName, current.cbzBlob.size);
                 next.id = id;
                 this.completedFiles.set(id, next);
                 this.retainedBytes += next.cbzBlob.size - current.cbzBlob.size;

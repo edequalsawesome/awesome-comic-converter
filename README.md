@@ -8,7 +8,7 @@ npm test
 npm run lint
 ```
 
-Open `http://127.0.0.1:8000`. Node 18+ is required for the test runner.
+Open `http://127.0.0.1:8000`. Python 3 is required for `npm start`; Node 18+ is required for the test runner.
 
 Drop AZW3 files or a folder. Each AZW3 becomes a separate job; a matching `book.opf` sidecar is used when unambiguous and a matching `book.jpg/png/gif` is offered as a selectable cover. For a one-book folder, `metadata.opf` and `cover.*` are also accepted. Results append to the current list. **Clear results** explicitly discards retained downloads; if the 512 MiB retained-output limit is reached, save completed files, then clear results before continuing. That cap covers completed CBZs only: parsing, cover previews, rebuilds, and Download All can temporarily use additional browser memory.
 

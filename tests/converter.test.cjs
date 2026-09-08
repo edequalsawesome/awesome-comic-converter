@@ -154,6 +154,20 @@ test('does not read past trailing JPEG fill bytes', () => {
   assert.doesNotThrow(() => parser.identifyImage(new Uint8Array([0xff, 0xd8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])));
 });
 
+test('keeps malformed JPEG SOF resources as dimension warnings', () => {
+  const parser = loadParser();
+  for (const bytes of [
+    new Uint8Array([0xff, 0xd8, 0xff, 0xff, 0xff, 0xff, 0xc0, 0x00, 0x02, 0x00, 0x00, 0x00]),
+    new Uint8Array([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x20, 0x08, 0x00, 0x01, 0x00, 0x01, 0x03, 0x01, 0x11, 0x00, 0x02])
+  ]) {
+    assert.doesNotThrow(() => parser.identifyImage(bytes));
+    const image = parser.identifyImage(bytes);
+    assert.equal(image.width, 0);
+    assert.equal(image.height, 0);
+    assert.equal(image.warning, true);
+  }
+});
+
 test('rejects hybrid MOBI6/KF8 containers before image extraction', async () => {
   await assert.rejects(() => loadParser().parseFile(fixture({ hybrid: true })), /Hybrid MOBI6\/KF8/i);
 });
@@ -201,6 +215,35 @@ test('preflights serialized metadata as well as selected image bytes', () => {
     ''
   );
   assert.ok(payload.estimate > 5 * 1024 * 1024);
+});
+
+test('credits a replaced result for rebuild budget checks but not ordinary intake', async () => {
+  const ComicConverter = loadApp();
+  const rebuild = async nextSize => {
+    const old = { sourceFile: {}, opfFile: null, coverFile: null, outputName: 'Issue.cbz', cbzBlob: new Blob([new Uint8Array(40)]), previewUrl: '', warnings: [] };
+    const controller = {
+      completedFiles: new Map([['issue', old]]), retainedBytes: 98, maxRetainedBytes: 100, activeOperation: false,
+      ensureBudget: ComicConverter.prototype.ensureBudget,
+      archivePrepared: ComicConverter.prototype.archivePrepared,
+      prepareResult: async job => ({ job, archive: { payload: {} }, selected: [{}], metadata: {}, candidates: [], settings: { includeSmall: false, coverRecordIndex: 1 }, estimate: 40 }),
+      postToWorker: async () => ({ blob: new Blob([new Uint8Array(nextSize)]) }),
+      createPreview: async () => ({ url: '' }),
+      runOperation: async (_, action) => action(), showCompletedFiles() {}, setBatchStatus() {},
+      errors: [], showError(...args) { this.errors.push(args); }, securityUtils: { sanitizeErrorMessage: error => error.message }
+    };
+    await ComicConverter.prototype.rebuildResult.call(controller, 'issue', {}, 'cover');
+    return { controller, old };
+  };
+
+  const replaced = await rebuild(40);
+  assert.notEqual(replaced.controller.completedFiles.get('issue'), replaced.old);
+  assert.equal(replaced.controller.retainedBytes, 98);
+  assert.throws(() => ComicConverter.prototype.ensureBudget.call({ retainedBytes: 98, maxRetainedBytes: 100 }, 3), /Retained output limit/);
+
+  const oversized = await rebuild(50);
+  assert.equal(oversized.controller.completedFiles.get('issue'), oversized.old);
+  assert.equal(oversized.controller.retainedBytes, 98);
+  assert.equal(oversized.controller.errors.length, 1);
 });
 
 test('ignores a broken optional sidecar until the user explicitly selects it', async () => {

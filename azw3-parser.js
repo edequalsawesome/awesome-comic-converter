@@ -186,6 +186,7 @@ class AZW3Parser {
             const length = view.getUint16(offset, false);
             if (length < 2 || offset + length > data.length) return null;
             if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) || (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf)) {
+                if (length < 8) return null;
                 const height = view.getUint16(offset + 3, false); const width = view.getUint16(offset + 5, false);
                 return width && height ? { width, height } : null;
             }
