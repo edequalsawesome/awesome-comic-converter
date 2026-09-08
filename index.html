@@ -3,10 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; media-src 'self'; frame-src 'none'; worker-src 'self'; child-src 'none'; form-action 'self'; base-uri 'self';">
-    <meta http-equiv="X-Content-Type-Options" content="nosniff">
-    <meta http-equiv="X-Frame-Options" content="DENY">
-    <meta http-equiv="X-XSS-Protection" content="1; mode=block">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; media-src 'self'; frame-src 'none'; worker-src 'self'; child-src 'none'; form-action 'self'; base-uri 'self';">
     <meta name="referrer" content="strict-origin-when-cross-origin">
     <title>Awesome Comic Converter - AZW3 to CBZ</title>
     <link rel="stylesheet" href="styles.css">
@@ -27,19 +24,19 @@
 
         <main>
             <div class="upload-section">
-                <div class="drop-zone" id="dropZone" role="button" tabindex="0" aria-label="Drop AZW3 files or press Enter to browse files">
+                <div class="drop-zone" id="dropZone">
                     <div class="drop-zone-content">
                         <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                             <polyline points="7,10 12,15 17,10"></polyline>
                             <line x1="12" y1="15" x2="12" y2="3"></line>
                         </svg>
-                        <h3>Drop AZW3 files or folders here</h3>
+                        <h2>Drop AZW3 files or folders here</h2>
                         <p>
                             <button type="button" class="browse-btn" id="browseBtn">browse files</button> or
                             <button type="button" class="browse-btn" id="browseFolderBtn">browse folders</button>
                         </p>
-                        <small>Supports AZW3 files and folders with AZW3 + metadata.opf + cover.jpg</small>
+                        <small>Supports AZW3 files and optional matching metadata.opf or cover images</small>
                     </div>
                 </div>
                 <label for="fileInput" class="sr-only">Choose AZW3 files</label>
@@ -49,25 +46,27 @@
             </div>
 
             <div class="instructions">
-                <h3>Instructions</h3>
+                <h2>Instructions</h2>
                 <ul>
                     <li><strong>Files:</strong> Select DRM-free AZW3 comic book files from Amazon</li>
                     <li><strong>Folders:</strong> Select folders containing AZW3 + metadata.opf + cover.jpg</li>
                     <li>All processing happens in your browser for complete privacy</li>
-                    <li>Images are extracted at highest available resolution</li>
+                    <li>Image resources are copied without re-encoding</li>
                     <li>Metadata is extracted from .opf files when available</li>
-                    <li>Cover images are included in the final CBZ</li>
-                    <li>Output CBZ files maintain proper reading order</li>
+                    <li>Choose an embedded or optional sidecar cover before downloading</li>
+                    <li>Output follows AZW3 resource order; review the cover before downloading</li>
                 </ul>
             </div>
+            <p id="batchStatus" class="batch-status" role="status" aria-live="polite"></p>
+            <button type="button" class="clear-btn" id="clearBtn" style="display: none;">Clear results</button>
 
             <div class="processing-section" id="processingSection" style="display: none;">
-                <h3>Processing Files</h3>
+                <h2>Processing Files</h2>
                 <div class="file-list" id="fileList"></div>
             </div>
 
             <div class="results-section" id="resultsSection" style="display: none;">
-                <h3>Conversion Complete</h3>
+                <h2>Conversion Complete</h2>
                 <div class="download-list" id="downloadList"></div>
                 <div class="bulk-actions">
                     <button type="button" class="download-all-btn" id="downloadAllBtn" style="display: none;">
@@ -76,12 +75,11 @@
                      <button type="button" class="download-all-btn" id="saveAllBtn" style="display: none;">
                          💾 Save All to Folder
                      </button>
-                    <button type="button" class="clear-btn" id="clearBtn">Process More Files</button>
                 </div>
             </div>
 
-            <div class="error-section" id="errorSection" style="display: none;">
-                <h3>Errors</h3>
+            <div class="error-section" id="errorSection" role="alert" style="display: none;">
+                <h2>Errors</h2>
                 <div class="error-list" id="errorList"></div>
             </div>
         </main>
@@ -91,10 +89,7 @@
         </footer>
     </div>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"
-            integrity="sha512-XMVd28F1oH/O71fzwBnV7HucLxVwtxf26XV8P4wPk26EDxuGZ91N8bsOttmnomcCD3CS5ZMRL50H0GgOHvegtg=="
-            crossorigin="anonymous"
-            referrerpolicy="no-referrer"></script>
+    <script src="vendor/jszip.min.js"></script>
     <script src="security-utils.js"></script>
     <script src="azw3-parser.js"></script>
     <script src="opf-parser.js"></script>

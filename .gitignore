@@ -57,6 +57,9 @@ node_modules/
 test-files/
 *.azw3
 *.cbz
+converted/
+browser-artifacts/
+.playwright-mcp/
 
 # Build outputs
 dist/

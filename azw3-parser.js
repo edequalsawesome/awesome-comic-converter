@@ -1,339 +1,212 @@
-/**
- * AZW3 Parser for Comic Book Files
- * Handles parsing of Amazon's AZW3 format to extract embedded images
- */
-
+/* Extract the image resources of an AZW3/MOBI container. */
 class AZW3Parser {
-    constructor() {
-        this.textDecoder = new TextDecoder('utf-8');
-        this.securityUtils = new SecurityUtils();
-    }
+    constructor() { this.securityUtils = new SecurityUtils(); }
 
-    /**
-     * Parse an AZW3 file and extract images
-     * @param {ArrayBuffer} buffer - The AZW3 file buffer
-     * @returns {Promise<Object>} - Parsed data with images and metadata
-     */
     async parseFile(buffer) {
+        if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 78) throw new Error('File too small to be a valid AZW3 file');
+        this.securityUtils.trackMemoryUsage(buffer.byteLength, 'add');
         try {
-            // Validate file size and structure
-            if (!buffer || buffer.byteLength === 0) {
-                throw new Error('Empty or invalid file');
-            }
-            
-            if (buffer.byteLength < 78) { // Minimum size for Palm header
-                throw new Error('File too small to be a valid AZW3 file');
-            }
-            
-            // Track memory usage
-            this.securityUtils.trackMemoryUsage(buffer.byteLength, 'add');
-            
-            try {
-                // Validate file signature
-                this.securityUtils.validateFileSignature(buffer, 'azw3');
-                
-                const dataView = new DataView(buffer);
-                const uint8Array = new Uint8Array(buffer);
-                
-                // Check if this is a valid Mobipocket/AZW3 file
-                const palmHeader = this.parsePalmHeader(dataView);
-                if (!palmHeader.isValid) {
-                    throw new Error('Invalid AZW3 file format');
-                }
-
-                // Find and parse MOBI header
-                const mobiHeader = this.parseMobiHeader(dataView, palmHeader);
-                
-                // Extract images from the file
-                const images = await this.extractImages(uint8Array, palmHeader, mobiHeader);
-                
-                // Extract metadata
-                const metadata = this.extractMetadata(dataView, mobiHeader);
-                
-                return {
-                    images,
-                    metadata,
-                    pageCount: images.length
-                };
-            } finally {
-                // Clean up memory tracking
-                this.securityUtils.trackMemoryUsage(buffer.byteLength, 'remove');
-            }
+            this.securityUtils.validateFileSignature(buffer, 'azw3');
+            const view = new DataView(buffer);
+            const palm = this.parsePalmHeader(view);
+            const mobi = this.parseMobiHeader(view, palm);
+            const exth = this.parseExth(view, mobi);
+            if (this.isHybrid(new Uint8Array(buffer), palm, exth)) throw new Error('Hybrid MOBI6/KF8 containers are not supported');
+            const metadata = this.extractMetadata(view, palm, mobi, exth);
+            const images = this.extractImages(new Uint8Array(buffer), palm, mobi);
+            return { images, metadata, imageWarnings: images.map(image => image.warning).filter(Boolean), pageCount: images.length, warning: 'Images use resource order; logical reading order is not verified.' };
         } catch (error) {
-            // Clean up memory tracking on error
-            this.securityUtils.trackMemoryUsage(buffer.byteLength, 'remove');
             throw new Error(`Failed to parse AZW3 file: ${error.message}`);
+        } finally {
+            this.securityUtils.trackMemoryUsage(buffer.byteLength, 'remove');
         }
     }
 
-    /**
-     * Parse the Palm Database Header
-     */
-    parsePalmHeader(dataView) {
-        try {
-            // Palm database header is 78 bytes
-            const name = this.readString(dataView, 0, 32);
-            const type = this.readString(dataView, 60, 4);
-            const creator = this.readString(dataView, 64, 4);
-            const recordCount = dataView.getUint16(76, false); // big-endian
-            
-            // Check for MOBI/BOOK type
-            const isValid = (type === 'BOOK' || type === 'MOBI') && recordCount > 0;
-            
-            // Parse record info list
-            const records = [];
-            let offset = 78;
-            
-            for (let i = 0; i < recordCount; i++) {
-                const recordOffset = dataView.getUint32(offset, false);
-                const attributes = dataView.getUint8(offset + 4);
-                const uniqueId = dataView.getUint32(offset + 5, false) & 0xFFFFFF;
-                
-                records.push({
-                    offset: recordOffset,
-                    attributes,
-                    uniqueId
-                });
-                
-                offset += 8;
-            }
-            
-            return {
-                isValid,
-                name: name.replace(/\0/g, ''),
-                type,
-                creator,
-                recordCount,
-                records
-            };
-        } catch (error) {
-            return { isValid: false };
+    parsePalmHeader(view) {
+        const recordCount = view.getUint16(76, false);
+        const directoryEnd = 78 + recordCount * 8;
+        if (!recordCount || directoryEnd > view.byteLength) throw new Error('Invalid Palm record directory');
+        const type = this.readAscii(view, 60, 4);
+        const creator = this.readAscii(view, 64, 4);
+        if (!['BOOK', 'MOBI', 'TEXT', 'AZW3'].includes(type) && !['MOBI', 'BOOK', 'AZW3'].includes(creator)) throw new Error('Invalid AZW3 file format');
+        const records = [];
+        let previous = directoryEnd - 1;
+        for (let index = 0; index < recordCount; index++) {
+            const offset = view.getUint32(78 + index * 8, false);
+            if (offset < directoryEnd || offset <= previous || offset >= view.byteLength) throw new Error('Invalid or overlapping Palm record offsets');
+            records.push({
+                offset,
+                attributes: view.getUint8(82 + index * 8),
+                uniqueId: (view.getUint8(83 + index * 8) << 16) | (view.getUint8(84 + index * 8) << 8) | view.getUint8(85 + index * 8)
+            });
+            previous = offset;
         }
+        for (let index = 0; index < records.length; index++) records[index].end = records[index + 1]?.offset || view.byteLength;
+        return { type, creator, records, recordCount };
     }
 
-    /**
-     * Parse the MOBI header
-     */
-    parseMobiHeader(dataView, palmHeader) {
-        try {
-            const firstRecordOffset = palmHeader.records[0].offset;
-            
-            // Skip PalmDOC header (16 bytes) to get to MOBI header
-            const mobiOffset = firstRecordOffset + 16;
-            
-            // Check MOBI identifier
-            const mobiId = this.readString(dataView, mobiOffset, 4);
-            if (mobiId !== 'MOBI') {
-                throw new Error('MOBI header not found');
-            }
-            
-            const headerLength = dataView.getUint32(mobiOffset + 4, false);
-            const mobiType = dataView.getUint32(mobiOffset + 8, false);
-            const textEncoding = dataView.getUint32(mobiOffset + 12, false);
-            
-            // Get EXTH header info
-            const exthFlag = dataView.getUint32(mobiOffset + 128, false);
-            const hasExth = (exthFlag & 0x40) !== 0;
-            
-            // Find first image record
-            let firstImageIndex = 0;
-            if (headerLength >= 108) {
-                firstImageIndex = dataView.getUint32(mobiOffset + 108, false);
-            }
-            
-            return {
-                offset: mobiOffset,
-                headerLength,
-                mobiType,
-                textEncoding,
-                hasExth,
-                firstImageIndex
-            };
-        } catch (error) {
-            throw new Error(`Failed to parse MOBI header: ${error.message}`);
-        }
-    }
-
-    /**
-     * Extract images from the AZW3 file
-     */
-    async extractImages(uint8Array, palmHeader, mobiHeader) {
-        const images = [];
-        
-        try {
-            // Start looking for images from the first image record
-            const startIndex = Math.max(1, mobiHeader.firstImageIndex);
-            
-            for (let i = startIndex; i < palmHeader.records.length; i++) {
-                const record = palmHeader.records[i];
-                const nextRecord = palmHeader.records[i + 1];
-                
-                // Calculate record size
-                const recordSize = nextRecord ? 
-                    nextRecord.offset - record.offset : 
-                    uint8Array.length - record.offset;
-                
-                if (recordSize < 10) continue; // Too small to be an image
-                
-                // Extract record data without copying to reduce memory pressure
-                const recordData = uint8Array.subarray(record.offset, record.offset + recordSize);
-                
-                // Check if this looks like an image
-                const imageInfo = this.identifyImage(recordData);
-                if (imageInfo) {
-                    images.push({
-                        data: recordData,
-                        format: imageInfo.format,
-                        width: imageInfo.width,
-                        height: imageInfo.height,
-                        index: i - startIndex,
-                        filename: `page_${String(i - startIndex + 1).padStart(3, '0')}.${imageInfo.extension}`
-                    });
-                }
-            }
-            
-            // Sort images by index to maintain reading order
-            images.sort((a, b) => a.index - b.index);
-            
-            return images;
-        } catch (error) {
-            throw new Error(`Failed to extract images: ${error.message}`);
-        }
-    }
-
-    /**
-     * Identify image format and extract basic info
-     */
-    identifyImage(data) {
-        if (data.length < 10) return null;
-        
-        // Check for JPEG
-        if (data[0] === 0xFF && data[1] === 0xD8) {
-            const dims = this.getJpegDimensions(data) || { width: 0, height: 0 };
-            return {
-                format: 'JPEG',
-                extension: 'jpg',
-                width: dims.width,
-                height: dims.height
-            };
-        }
-        
-        // Check for PNG
-        if (data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4E && data[3] === 0x47) {
-            const dims = this.getPngDimensions(data) || { width: 0, height: 0 };
-            return {
-                format: 'PNG',
-                extension: 'png',
-                width: dims.width,
-                height: dims.height
-            };
-        }
-        
-        // Check for GIF
-        if (data[0] === 0x47 && data[1] === 0x49 && data[2] === 0x46) {
-            const dims = this.getGifDimensions(data) || { width: 0, height: 0 };
-            return {
-                format: 'GIF',
-                extension: 'gif',
-                width: dims.width,
-                height: dims.height
-            };
-        }
-        
-        return null;
-    }
-
-    /**
-     * Get JPEG dimensions
-     */
-    getJpegDimensions(data) {
-        try {
-            const dataView = new DataView(data.buffer, data.byteOffset, data.byteLength);
-            let offset = 2;
-            
-            while (offset < data.length - 4) {
-                const marker = dataView.getUint16(offset, false);
-                
-                if (marker === 0xFFC0 || marker === 0xFFC2) { // SOF0 or SOF2
-                    const height = dataView.getUint16(offset + 5, false);
-                    const width = dataView.getUint16(offset + 7, false);
-                    return { width, height };
-                }
-                
-                const segmentLength = dataView.getUint16(offset + 2, false);
-                offset += 2 + segmentLength;
-            }
-        } catch (error) {
-            // Ignore errors, return null
-        }
-        return null;
-    }
-
-    /**
-     * Get PNG dimensions
-     */
-    getPngDimensions(data) {
-        try {
-            if (data.length < 24) return null;
-            const dataView = new DataView(data.buffer, data.byteOffset, data.byteLength);
-            const width = dataView.getUint32(16, false);
-            const height = dataView.getUint32(20, false);
-            return { width, height };
-        } catch (error) {
-            return null;
-        }
-    }
-
-    /**
-     * Get GIF dimensions
-     */
-    getGifDimensions(data) {
-        try {
-            if (data.length < 10) return null;
-            const dataView = new DataView(data.buffer, data.byteOffset, data.byteLength);
-            const width = dataView.getUint16(6, true); // little-endian
-            const height = dataView.getUint16(8, true);
-            return { width, height };
-        } catch (error) {
-            return null;
-        }
-    }
-
-    /**
-     * Extract metadata from the file
-     */
-    extractMetadata(dataView, mobiHeader) {
-        const metadata = {
-            title: 'Unknown Comic',
-            author: 'Unknown Author',
-            publisher: 'Unknown Publisher'
+    parseMobiHeader(view, palm) {
+        const first = palm.records[0];
+        const offset = first.offset + 16;
+        if (offset + 116 > first.end || this.readAscii(view, offset, 4) !== 'MOBI') throw new Error('MOBI header not found or truncated');
+        const headerLength = view.getUint32(offset + 4, false);
+        if (headerLength < 116 || offset + headerLength > first.end) throw new Error('Invalid MOBI header length');
+        const firstImageIndex = view.getUint32(offset + 92, false);
+        if (firstImageIndex !== 0xffffffff && (firstImageIndex < 1 || firstImageIndex >= palm.records.length)) throw new Error('Invalid first image record index');
+        return {
+            offset, recordOffset: first.offset, recordEnd: first.end, headerLength,
+            textEncoding: view.getUint32(offset + 12, false),
+            hasExth: (view.getUint32(offset + 112, false) & 0x40) !== 0,
+            firstImageIndex, titleOffset: view.getUint32(offset + 68, false), titleLength: view.getUint32(offset + 72, false)
         };
-        
-        try {
-            // Try to extract title from MOBI header
-            // This is a simplified extraction - full EXTH parsing would be more complex
-            if (mobiHeader.hasExth) {
-                // EXTH header parsing would go here
-                // For now, we'll use basic defaults
-            }
-        } catch (error) {
-            // Use defaults if extraction fails
+    }
+
+    parseExth(view, mobi) {
+        if (!mobi.hasExth) return new Map();
+        const start = mobi.offset + mobi.headerLength;
+        if (start + 12 > mobi.recordEnd || this.readAscii(view, start, 4) !== 'EXTH') throw new Error('Malformed EXTH header');
+        const length = view.getUint32(start + 4, false);
+        const count = view.getUint32(start + 8, false);
+        const end = start + length;
+        if (length < 12 || end > mobi.recordEnd || count > Math.floor((length - 12) / 8)) throw new Error('Malformed EXTH bounds');
+        const fields = new Map();
+        let offset = start + 12;
+        for (let index = 0; index < count; index++) {
+            if (offset + 8 > end) throw new Error('Malformed EXTH record');
+            const type = view.getUint32(offset, false);
+            const recordLength = view.getUint32(offset + 4, false);
+            if (recordLength < 8 || offset + recordLength > end) throw new Error('Malformed EXTH record length');
+            if ([121, 201, 202].includes(type) && recordLength !== 12) throw new Error('Malformed EXTH numeric record');
+            const values = fields.get(type) || [];
+            values.push(new Uint8Array(view.buffer, view.byteOffset + offset + 8, recordLength - 8));
+            fields.set(type, values);
+            offset += recordLength;
         }
-        
+        return fields;
+    }
+
+    isHybrid(bytes, palm, exth) {
+        if (palm.records.slice(1).some(record => record.end - record.offset >= 8 && this.readBytes(bytes, record.offset, 8) === 'BOUNDARY')) return true;
+        return exth.get(121)?.some(value => this.isKf8Record(bytes, palm.records[this.numberValue(value)])) || false;
+    }
+
+    isKf8Record(bytes, record) {
+        if (!record || record.end - record.offset < 140) return false;
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const offset = record.offset + 16;
+        if (this.readBytes(bytes, offset, 4) !== 'MOBI') return false;
+        const headerLength = view.getUint32(offset + 4, false);
+        const version = view.getUint32(offset + 20, false);
+        return headerLength >= 116 && offset + headerLength <= record.end && version >= 8;
+    }
+
+    extractImages(bytes, palm, mobi) {
+        if (mobi.firstImageIndex === 0xffffffff) return [];
+        const images = [];
+        for (let recordIndex = mobi.firstImageIndex; recordIndex < palm.records.length; recordIndex++) {
+            const record = palm.records[recordIndex];
+            const data = bytes.subarray(record.offset, record.end);
+            const info = this.identifyImage(data);
+            if (info) images.push({ ...info, warning: info.warning ? `Image resource ${recordIndex} has an unreadable dimensions header.` : '', data, recordIndex, filename: '' });
+        }
+        return images;
+    }
+
+    extractMetadata(view, palm, mobi, exth) {
+        const text = type => (exth.get(type) || []).map(value => this.decode(value, mobi.textEncoding).trim()).filter(Boolean);
+        const number = type => exth.get(type)?.[0] ? this.numberValue(exth.get(type)[0]) : null;
+        let title = text(503)[0] || '';
+        if (!title && mobi.titleLength && mobi.titleOffset + mobi.titleLength <= mobi.recordEnd - mobi.recordOffset) {
+            title = this.decode(new Uint8Array(view.buffer, view.byteOffset + mobi.recordOffset + mobi.titleOffset, mobi.titleLength), mobi.textEncoding).trim();
+        }
+        const author = text(100).join(', ');
+        const metadata = {
+            title, author, creator: author, publisher: text(101)[0] || '', description: text(103)[0] || '',
+            date: text(106)[0] || '', language: text(524)[0] || '',
+            coverRecordIndex: this.resourceRecord(mobi.firstImageIndex, number(201), palm.records.length),
+            thumbnailRecordIndex: this.resourceRecord(mobi.firstImageIndex, number(202), palm.records.length), series: '', seriesIndex: ''
+        };
+        const series = title.match(/^(.*?)\s+#\s*(\d+(?:\.\d+)?)(?:\s*\([^)]*\))?$/);
+        if (series) { metadata.series = series[1].trim(); metadata.seriesIndex = series[2]; }
         return metadata;
     }
 
-    /**
-     * Helper function to read string from DataView
-     */
-    readString(dataView, offset, length) {
-        const bytes = new Uint8Array(length);
-        for (let i = 0; i < length; i++) {
-            bytes[i] = dataView.getUint8(offset + i);
-        }
-        return this.textDecoder.decode(bytes);
+    resourceRecord(firstImageIndex, relativeIndex, length) {
+        if (firstImageIndex === 0xffffffff || relativeIndex === null || relativeIndex === 0xffffffff) return null;
+        const recordIndex = firstImageIndex + relativeIndex;
+        return recordIndex >= firstImageIndex && recordIndex < length ? recordIndex : null;
     }
+
+    buildSelection(images, metadata, options = {}) {
+        // ponytail: resource order is the available ceiling; add a spine decoder only when image order proves insufficient.
+        const hasLargeImage = images.some(image => image.width > 0 && image.height > 0 && (image.width > 64 || image.height > 64));
+        // ponytail: omit <=64px ancillary resources only beside larger pages; add per-format classification if this heuristic proves wrong.
+        const eligible = image => options.includeSmall || (image.recordIndex !== metadata.thumbnailRecordIndex && (!hasLargeImage || !this.isTiny(image)));
+        const pool = images.filter(eligible);
+        const usable = pool.length ? pool : images;
+        const requested = images.find(image => image.recordIndex === options.coverRecordIndex);
+        const automatic = usable.find(image => image.recordIndex === metadata.coverRecordIndex);
+        const cover = requested || automatic || usable[0] || null;
+        const output = cover && !usable.includes(cover) ? [cover, ...usable] : cover ? [cover, ...usable.filter(image => image !== cover)] : [];
+        return this.nameSelectedImages(output);
+    }
+
+    nameSelectedImages(images) {
+        const width = Math.max(4, String(images.length).length);
+        return images.map((image, index) => ({ ...image, filename: `page_${String(index + 1).padStart(width, '0')}.${image.extension}` }));
+    }
+
+    isTiny(image) { return image.width > 0 && image.height > 0 && image.width <= 64 && image.height <= 64; }
+
+    identifyImage(data) {
+        if (data.length < 10) return null;
+        if (data[0] === 0xff && data[1] === 0xd8) {
+            const dimensions = this.getJpegDimensions(data);
+            return dimensions ? { format: 'JPEG', extension: 'jpg', ...dimensions } : { format: 'JPEG', extension: 'jpg', width: 0, height: 0, warning: true };
+        }
+        if (data.length >= 24 && data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47 && data[4] === 0x0d && data[5] === 0x0a && data[6] === 0x1a && data[7] === 0x0a) {
+            const view = new DataView(data.buffer, data.byteOffset, data.byteLength); const width = view.getUint32(16, false); const height = view.getUint32(20, false);
+            return width && height ? { format: 'PNG', extension: 'png', width, height } : { format: 'PNG', extension: 'png', width: 0, height: 0, warning: true };
+        }
+        if (data.length >= 10 && data[0] === 0x47 && data[1] === 0x49 && data[2] === 0x46 && data[3] === 0x38) {
+            const view = new DataView(data.buffer, data.byteOffset, data.byteLength); const width = view.getUint16(6, true); const height = view.getUint16(8, true);
+            return width && height ? { format: 'GIF', extension: 'gif', width, height } : { format: 'GIF', extension: 'gif', width: 0, height: 0, warning: true };
+        }
+        return null;
+    }
+
+    getJpegDimensions(data) {
+        const view = new DataView(data.buffer, data.byteOffset, data.byteLength); let offset = 2;
+        while (offset + 9 < data.length) {
+            if (view.getUint8(offset) !== 0xff) return null;
+            while (offset < data.length && view.getUint8(offset) === 0xff) offset++;
+            if (offset >= data.length) return null;
+            const marker = view.getUint8(offset++);
+            if (marker === 0xd9 || marker === 0xda || offset + 2 > data.length) return null;
+            const length = view.getUint16(offset, false);
+            if (length < 2 || offset + length > data.length) return null;
+            if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) || (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf)) {
+                if (length < 8) return null;
+                const height = view.getUint16(offset + 3, false); const width = view.getUint16(offset + 5, false);
+                return width && height ? { width, height } : null;
+            }
+            offset += length;
+        }
+        return null;
+    }
+
+    decode(bytes, encoding) { return new TextDecoder(encoding === 1252 ? 'windows-1252' : 'utf-8').decode(bytes); }
+    numberValue(value) {
+        if (value.length === 4) return new DataView(value.buffer, value.byteOffset, 4).getUint32(0, false);
+        const parsed = Number.parseInt(new TextDecoder('ascii').decode(value), 10);
+        return Number.isInteger(parsed) ? parsed : 0;
+    }
+    readAscii(view, offset, length) {
+        if (offset < 0 || offset + length > view.byteLength) throw new Error('Unexpected end of file');
+        let value = ''; for (let index = 0; index < length; index++) value += String.fromCharCode(view.getUint8(offset + index));
+        return value;
+    }
+    readBytes(bytes, offset, length) { return String.fromCharCode(...bytes.subarray(offset, offset + length)); }
 }
 
-// Export for use in other modules
 window.AZW3Parser = AZW3Parser;

@@ -4,9 +4,10 @@
   "description": "A web-based application for converting DRM-free Amazon comic book files (AZW3) to CBZ format",
   "main": "index.html",
   "scripts": {
-    "start": "python -m http.server 8000",
+    "start": "python3 -m http.server 8000 --bind 127.0.0.1",
     "serve": "npx http-server -p 8000",
-    "test": "open test.html"
+    "test": "node --test tests/*.test.cjs",
+    "lint": "node --check app.js && node --check azw3-parser.js && node --check opf-parser.js && node --check security-utils.js && node --check zip-worker.js"
   },
   "keywords": [
     "comic",
@@ -22,21 +23,15 @@
   "license": "LGPL-3.0-or-later",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-username/awesome-comic-converter.git"
+    "url": "https://github.com/edequalsawesome/awesome-comic-converter.git"
   },
   "bugs": {
-    "url": "https://github.com/your-username/awesome-comic-converter/issues"
+    "url": "https://github.com/edequalsawesome/awesome-comic-converter/issues"
   },
-  "homepage": "https://github.com/your-username/awesome-comic-converter#readme",
+  "homepage": "https://github.com/edequalsawesome/awesome-comic-converter#readme",
   "dependencies": {},
   "devDependencies": {},
   "engines": {
-    "node": ">=12.0.0"
-  },
-  "browserslist": [
-    "Chrome >= 60",
-    "Firefox >= 55",
-    "Safari >= 11",
-    "Edge >= 79"
-  ]
+    "node": ">=18.0.0"
+  }
 }

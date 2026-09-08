@@ -1,1205 +1,467 @@
-/**
- * Comic Converter Application
- * Main application logic for converting AZW3 to CBZ
- */
-
 class ComicConverter {
     constructor() {
         this.securityUtils = new SecurityUtils();
         this.parser = new AZW3Parser();
         this.opfParser = new OPFParser();
-        this.zipWorker = null;
-        this.workerRequestId = 0;
-        this.workerCallbacks = new Map();
-        this.processingFiles = new Map();
         this.completedFiles = new Map();
         this.errors = [];
-        
-        // Setup global error handling
+        this.pendingFileNames = [];
+        this.retainedBytes = 0;
+        this.maxRetainedBytes = 512 * 1024 * 1024;
+        this.activeOperation = false;
+        this.zipWorker = null;
+        this.workerCallbacks = new Map();
+        this.workerRequestId = 0;
         this.securityUtils.setupGlobalErrorHandler();
-        
         this.initializeZipWorker();
         this.initializeEventListeners();
         this.initializeTheme();
     }
 
-    /**
-     * Initialize Zip Worker
-     */
     initializeZipWorker() {
         try {
             this.zipWorker = new Worker('zip-worker.js');
-            this.zipWorker.onmessage = (e) => {
-                const { id, ok, result, error } = e.data || {};
-                const cb = this.workerCallbacks.get(id);
-                if (!cb) return;
-                this.workerCallbacks.delete(id);
-                if (ok) {
-                    cb.resolve(result);
-                } else {
-                    cb.reject(new Error(error || 'Worker error'));
-                }
-            };
-        } catch (error) {
-            console.warn('Zip Worker initialization failed, falling back to main thread:', error);
-            this.zipWorker = null;
-        }
+            this.zipWorker.onmessage = event => this.finishWorkerRequest(event.data || {});
+            this.zipWorker.onerror = event => { event.preventDefault?.(); this.failWorker(event.message || 'Archive worker failed'); };
+            this.zipWorker.onmessageerror = () => this.failWorker('Archive worker response could not be read');
+        } catch (_) { this.zipWorker = null; }
     }
 
-    /**
-     * Post a request to the worker
-     */
+    finishWorkerRequest({ id, ok, result, error }) {
+        const callback = this.workerCallbacks.get(id);
+        if (!callback) return;
+        this.workerCallbacks.delete(id);
+        ok ? callback.resolve(result) : callback.reject(new Error(error || 'Archive worker failed'));
+    }
+
+    failWorker(message) {
+        for (const callback of this.workerCallbacks.values()) callback.reject(new Error(message));
+        this.workerCallbacks.clear();
+        if (this.zipWorker) this.zipWorker.terminate();
+        this.zipWorker = null;
+    }
+
     postToWorker(action, payload) {
-        if (!this.zipWorker) {
-            return Promise.reject(new Error('Worker unavailable'));
-        }
+        if (!this.zipWorker) return Promise.reject(new Error('Archive worker unavailable'));
         const id = ++this.workerRequestId;
         return new Promise((resolve, reject) => {
             this.workerCallbacks.set(id, { resolve, reject });
-            this.zipWorker.postMessage({ id, action, payload });
+            try { this.zipWorker.postMessage({ id, action, payload }); }
+            catch (error) { this.workerCallbacks.delete(id); reject(error); }
         });
     }
 
-    /**
-     * Initialize all event listeners
-     */
     initializeEventListeners() {
-        const dropZone = document.getElementById('dropZone');
         const fileInput = document.getElementById('fileInput');
         const folderInput = document.getElementById('folderInput');
-        const browseBtn = document.getElementById('browseBtn');
-        const browseFolderBtn = document.getElementById('browseFolderBtn');
-        const clearBtn = document.getElementById('clearBtn');
-        const downloadAllBtn = document.getElementById('downloadAllBtn');
-        const saveAllBtn = document.getElementById('saveAllBtn');
-        const themeToggle = document.getElementById('themeToggle');
-
-        // File input events
-        fileInput.addEventListener('change', (e) => this.handleFiles(e.target.files));
-        folderInput.addEventListener('change', (e) => this.handleFolders(e.target.files));
-        browseBtn.addEventListener('click', () => fileInput.click());
-        browseFolderBtn.addEventListener('click', () => folderInput.click());
-        clearBtn.addEventListener('click', () => this.clearResults());
-        downloadAllBtn.addEventListener('click', () => this.downloadAllFiles());
-        if (saveAllBtn) {
-            saveAllBtn.addEventListener('click', () => this.saveAllToFolder());
-        }
-        themeToggle.addEventListener('click', () => this.toggleTheme());
-
-        // Drag and drop events
-        dropZone.addEventListener('dragover', this.handleDragOver.bind(this));
-        dropZone.addEventListener('dragleave', this.handleDragLeave.bind(this));
-        dropZone.addEventListener('drop', this.handleDrop.bind(this));
-        // Keyboard activation for accessibility
-        dropZone.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                fileInput.click();
-            }
-        });
-
-        // Prevent default drag behaviors on the document
-        document.addEventListener('dragover', (e) => e.preventDefault());
-        document.addEventListener('drop', (e) => e.preventDefault());
+        const dropZone = document.getElementById('dropZone');
+        fileInput.addEventListener('change', event => this.snapshotInput(event.target, 'files'));
+        folderInput.addEventListener('change', event => this.snapshotInput(event.target, 'folders'));
+        document.getElementById('browseBtn').addEventListener('click', () => fileInput.click());
+        document.getElementById('browseFolderBtn').addEventListener('click', () => folderInput.click());
+        document.getElementById('clearBtn').addEventListener('click', () => this.clearResults());
+        document.getElementById('downloadAllBtn').addEventListener('click', () => this.downloadAllFiles());
+        document.getElementById('saveAllBtn').addEventListener('click', () => this.saveAllToFolder());
+        document.getElementById('themeToggle').addEventListener('click', () => this.toggleTheme());
+        dropZone.addEventListener('dragover', event => { event.preventDefault(); dropZone.classList.add('drag-over'); });
+        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+        dropZone.addEventListener('drop', event => this.handleDrop(event));
+        document.addEventListener('dragover', event => event.preventDefault());
+        document.addEventListener('drop', event => event.preventDefault());
     }
 
-    /**
-     * Handle drag over event
-     */
-    handleDragOver(e) {
-        e.preventDefault();
-        e.stopPropagation();
-        document.getElementById('dropZone').classList.add('drag-over');
+    snapshotInput(input, source) {
+        const files = Array.from(input.files || []);
+        input.value = '';
+        this.processSnapshot(files, source);
     }
 
-    /**
-     * Handle drag leave event
-     */
-    handleDragLeave(e) {
-        e.preventDefault();
-        e.stopPropagation();
-        document.getElementById('dropZone').classList.remove('drag-over');
+    async handleDrop(event) {
+        event.preventDefault();
+        const zone = document.getElementById('dropZone');
+        zone.classList.remove('drag-over');
+        if (this.activeOperation) return this.setBatchStatus('A conversion is already running. Wait for it to finish before adding another batch.');
+        await this.runOperation('drop intake', async () => this.convertSnapshot(await this.processDroppedItems(event.dataTransfer)));
     }
 
-    /**
-     * Handle drop event
-     */
-    async handleDrop(e) {
-        e.preventDefault();
-        e.stopPropagation();
-        document.getElementById('dropZone').classList.remove('drag-over');
-        
-        console.log('Drop event triggered');
-        console.log('DataTransfer items:', e.dataTransfer.items.length);
-        console.log('DataTransfer files:', e.dataTransfer.files.length);
-        
-        // Check if we can use the File System Access API approach
-        const files = await this.processDroppedItems(e.dataTransfer);
-        
-        console.log(`Total files collected: ${files.length}`);
-        
-        // Check if we had items but couldn't process most of them
-        const itemCount = e.dataTransfer.items.length;
-        if (files.length > 0 && files.length < itemCount) {
-            const processedFolders = Math.ceil(files.length / 4); // Assuming ~4 files per folder
-            const totalFolders = itemCount;
-            this.showError(
-                'Multiple Folder Limitation', 
-                `Only ${processedFolders} of ${totalFolders} folders could be processed due to browser limitations. Please drag folders one at a time or use the "browse folders" button for multiple folders.`
-            );
-            // Continue processing the files we did get
-        } else if (files.length === 0) {
-            this.showError('No valid files found', 'Please drop AZW3 files or folders containing AZW3 + metadata files');
-            return;
-        }
-        
-        // Check if we have folder structure
-        const hasDirectoryStructure = files.some(file =>
-            file.webkitRelativePath && file.webkitRelativePath.includes('/')
-        );
-        
-        // Also check if we have multiple files that suggest a folder structure
-        const hasMultipleRelatedFiles = files.length > 1 && this.looksLikeFolderStructure(files);
-        
-        if (hasDirectoryStructure || hasMultipleRelatedFiles) {
-            // Set webkitRelativePath for dropped folder files if not set
-            if (!hasDirectoryStructure && hasMultipleRelatedFiles) {
-                files.forEach(file => {
-                    if (!file.webkitRelativePath) {
-                        // Create a synthetic path based on common folder name
-                        const folderName = this.inferFolderName(files);
-                        // Use a safer approach to track file paths
-                        file._syntheticPath = `${folderName}/${file.name}`;
-                    }
-                });
-            }
-            this.handleFolders(files);
-        } else {
-            // Filter for AZW3 files
-            const azw3Files = files.filter(file =>
-                file.name.toLowerCase().endsWith('.azw3')
-            );
-            
-            if (azw3Files.length === 0) {
-                this.showError('No valid files found', 'Please drop AZW3 files or folders containing AZW3 + metadata files');
-                return;
-            }
-            
-            this.handleFiles(azw3Files);
-        }
-    }
-
-    /**
-     * Process dropped items with better handling for multiple folders
-     */
     async processDroppedItems(dataTransfer) {
-        const items = Array.from(dataTransfer.items);
         const files = [];
-        
-        console.log('Processing items:', items.length);
-        
-        // Process all items, but handle the webkitGetAsEntry() limitation
-        // where only some items return valid entries
-        const processPromises = [];
-        
-        for (let i = 0; i < items.length; i++) {
-            const item = items[i];
-            console.log(`Item ${i}:`, {
-                kind: item.kind,
-                type: item.type,
-                webkitGetAsEntry: !!item.webkitGetAsEntry
-            });
-            
-            if (item.kind === 'file') {
-                // Try to get entry, but don't fail if it returns null
-                const processItem = async () => {
-                    try {
-                        const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
-                        console.log(`Entry ${i}:`, entry ? {
-                            name: entry.name,
-                            isDirectory: entry.isDirectory,
-                            isFile: entry.isFile
-                        } : 'No entry');
-                        
-                        if (entry) {
-                            if (entry.isDirectory) {
-                                console.log(`Reading directory: ${entry.name}`);
-                                const dirFiles = await this.readDirectory(entry);
-                                console.log(`Found ${dirFiles.length} files in directory ${entry.name}`);
-                                return dirFiles;
-                            } else {
-                                // Handle individual file
-                                const file = item.getAsFile();
-                                console.log(`Individual file: ${file?.name}`);
-                                return file ? [file] : [];
-                            }
-                        } else {
-                            // webkitGetAsEntry() returned null, but this could still be a folder
-                            // Unfortunately, we can't access folder contents without a valid entry
-                            console.log(`Item ${i} has no entry - likely a folder that couldn't be processed`);
-                            return [];
-                        }
-                    } catch (error) {
-                        console.error(`Error processing item ${i}:`, error);
-                        return [];
-                    }
-                };
-                
-                processPromises.push(processItem());
-            }
+        const unreadable = [];
+        const items = Array.from(dataTransfer.items || []).map(item => ({ entry: item.webkitGetAsEntry?.(), file: item.getAsFile?.() }));
+        const fallbackFiles = Array.from(dataTransfer.files || []);
+        for (const item of items) {
+            const entry = item.entry;
+            if (!entry) { if (item.file) files.push(item.file); continue; }
+            try {
+                if (entry.isDirectory) files.push(...await this.readDirectory(entry));
+                else { const file = await this.getFileFromEntry(entry); if (file) files.push(file); }
+            } catch (_) { unreadable.push(entry.name); }
         }
-        
-        // Wait for all items to be processed
-        const results = await Promise.all(processPromises);
-        
-        // Flatten results
-        for (const result of results) {
-            files.push(...result);
-        }
-        
-        // Also check dataTransfer.files as a fallback for individual file drops
-        const dataTransferFiles = Array.from(dataTransfer.files);
-        console.log(`Checking ${dataTransferFiles.length} files for direct file drops`);
-        
-        for (const file of dataTransferFiles) {
-            console.log(`File: ${file.name}, webkitRelativePath: "${file.webkitRelativePath || 'empty'}"`);
-            
-            // Add files that have webkitRelativePath (came from folder selection)
-            // or if we haven't processed any entries yet (direct file drop)
-            if (file.webkitRelativePath && file.webkitRelativePath.includes('/')) {
-                files.push(file);
-                console.log(`Added file from folder structure: ${file.name}`);
-            } else if (files.length === 0 && !file.webkitRelativePath) {
-                // Only add direct files if we haven't found any through webkitGetAsEntry
-                files.push(file);
-                console.log(`Added direct file: ${file.name}`);
-            }
-        }
-        
+        if (!files.length) files.push(...fallbackFiles);
+        if (unreadable.length) this.showError('Unreadable folders', `Skipped ${unreadable.join(', ')}; readable files were kept.`);
         return files;
     }
 
-    /**
-     * Read directory contents recursively
-     */
-    async readDirectory(dirEntry, path = '') {
-        console.log(`Reading directory: ${dirEntry.name}, path: ${path}`);
-        const files = [];
-        const reader = dirEntry.createReader();
-        
-        const readAllEntries = () => {
-            return new Promise((resolve, reject) => {
-                const entries = [];
-                let batchCount = 0;
-                
-                const readBatch = () => {
-                    console.log(`Reading batch ${batchCount} for directory ${dirEntry.name}`);
-                    reader.readEntries((batchEntries) => {
-                        console.log(`Batch ${batchCount} returned ${batchEntries.length} entries`);
-                        if (batchEntries.length === 0) {
-                            console.log(`Finished reading directory ${dirEntry.name}, total entries: ${entries.length}`);
-                            resolve(entries);
-                        } else {
-                            entries.push(...batchEntries);
-                            batchCount++;
-                            readBatch(); // Continue reading
-                        }
-                    }, (error) => {
-                        console.error(`Error reading batch ${batchCount} for directory ${dirEntry.name}:`, error);
-                        reject(error);
-                    });
-                };
-                
-                readBatch();
-            });
-        };
-        
-        try {
-            const allEntries = await readAllEntries();
-            console.log(`Processing ${allEntries.length} entries from directory ${dirEntry.name}`);
-            
-            // Process all entries
-            for (const entry of allEntries) {
-                const fullPath = path ? `${path}/${entry.name}` : entry.name;
-                console.log(`Processing entry: ${entry.name}, isFile: ${entry.isFile}, isDirectory: ${entry.isDirectory}`);
-                
-                if (entry.isFile) {
-                    const file = await this.getFileFromEntry(entry);
-                    if (file) {
-                        console.log(`Added file: ${file.name}`);
-                        // Use a safer approach to track file paths
-                        file._syntheticPath = `${dirEntry.name}/${fullPath}`;
+    readDirectory(entry, path = entry.fullPath?.replace(/^\//, '') || entry.name) {
+        const readAll = reader => new Promise((resolve, reject) => {
+            const entries = [];
+            const next = () => reader.readEntries(batch => batch.length ? (entries.push(...batch), next()) : resolve(entries), reject);
+            next();
+        });
+        return readAll(entry.createReader()).then(async entries => {
+            const files = [];
+            for (const child of entries) {
+                const childPath = `${path}/${child.name}`;
+                if (child.isDirectory) {
+                    try { files.push(...await this.readDirectory(child, childPath)); }
+                    catch (_) { this.showError('Unreadable folder', `Skipped ${childPath}; readable files were kept.`); }
+                } else {
+                    try {
+                        const file = await this.getFileFromEntry(child);
+                        file._syntheticPath = childPath;
                         files.push(file);
-                    } else {
-                        console.log(`Failed to get file from entry: ${entry.name}`);
-                    }
-                } else if (entry.isDirectory) {
-                    console.log(`Recursing into subdirectory: ${entry.name}`);
-                    const subFiles = await this.readDirectory(entry, fullPath);
-                    console.log(`Subdirectory ${entry.name} returned ${subFiles.length} files`);
-                    files.push(...subFiles);
+                    } catch (_) { this.showError('Unreadable file', `Skipped ${childPath}; readable files were kept.`); }
                 }
             }
-            
-            console.log(`Directory ${dirEntry.name} final file count: ${files.length}`);
             return files;
-        } catch (error) {
-            console.error(`Error reading directory ${dirEntry.name}:`, error);
-            throw error;
-        }
-    }
-
-    /**
-     * Get file from directory entry
-     */
-    getFileFromEntry(fileEntry) {
-        return new Promise((resolve) => {
-            fileEntry.file(resolve, () => resolve(null));
         });
     }
 
-    /**
-     * Check if files look like they came from a folder structure
-     */
-    looksLikeFolderStructure(files) {
-        const hasAzw3 = files.some(f => f.name.toLowerCase().endsWith('.azw3'));
-        const hasOpf = files.some(f => f.name.toLowerCase().endsWith('.opf'));
-        const hasCover = files.some(f =>
-            f.name.toLowerCase().includes('cover') &&
-            /\.(jpg|jpeg|png|gif)$/i.test(f.name)
-        );
-        
-        // If we have AZW3 + (OPF or Cover), it's likely a folder structure
-        return hasAzw3 && (hasOpf || hasCover);
+    getFileFromEntry(entry) { return new Promise((resolve, reject) => entry.file(resolve, () => reject(new Error(`Could not read ${entry.name}`)))); }
+
+    async processSnapshot(files, source) {
+        if (this.activeOperation) return this.setBatchStatus('A conversion is already running. Existing results were kept.');
+        await this.runOperation(source, async () => this.convertSnapshot(files));
     }
 
-    /**
-     * Infer folder name from file collection
-     */
-    inferFolderName(files) {
-        // Try to find a common base name from the AZW3 file
-        const azw3File = files.find(f => f.name.toLowerCase().endsWith('.azw3'));
-        if (azw3File) {
-            return azw3File.name.replace(/\.azw3$/i, '');
+    async convertSnapshot(files) {
+        const jobs = this.buildJobs(files);
+        if (!jobs.length) return this.showError('No AZW3 files found', 'Choose AZW3 files or folders containing AZW3 files.');
+        if (jobs.length > this.securityUtils.MAX_FILES_PER_BATCH) throw new Error(`Too many AZW3 files. Maximum ${this.securityUtils.MAX_FILES_PER_BATCH} per batch.`);
+        const total = jobs.reduce((sum, job) => sum + (job.file.size || 0), 0);
+        if (total > this.securityUtils.MAX_TOTAL_SIZE) throw new Error('This AZW3 batch is too large. Split it into smaller batches.');
+        this.pendingFileNames = [];
+        document.getElementById('fileList').replaceChildren();
+        document.getElementById('processingSection').style.display = 'block';
+        let completed = 0;
+        let stopped = false;
+        for (let index = 0; index < jobs.length; index++) {
+            if (this.retainedBytes >= this.maxRetainedBytes) {
+                this.setCapStatus(jobs, index, completed, index);
+                stopped = true;
+                break;
+            }
+            try { if (await this.processJob(jobs[index])) completed++; }
+            catch (error) {
+                if (/Retained output limit/.test(error.message)) {
+                    this.setCapStatus(jobs, index, completed, index + 1);
+                    stopped = true;
+                    break;
+                }
+                throw error;
+            }
         }
-        
-        // Fallback to generic name
-        return 'Comic_Folder';
+        this.showResults();
+        if (!stopped) this.setBatchStatus(`Converted ${completed} of ${jobs.length} AZW3 file${jobs.length === 1 ? '' : 's'}; results were appended.`);
     }
 
-    /**
-     * Handle selected files
-     */
-    async handleFiles(files) {
-        if (files.length === 0) return;
-
-        try {
-            // Validate batch size and file sizes
-            this.securityUtils.validateBatchSize(files);
-            
-            // Validate each file
-            for (const file of files) {
-                this.securityUtils.validateFileSize(file);
-                this.securityUtils.validateFileExtension(file.name, ['azw3']);
-            }
-
-            // Clear previous results
-            this.clearResults();
-            
-            // Show processing section
-            document.getElementById('processingSection').style.display = 'block';
-            
-            // Process each file with rate limiting
-            for (const file of files) {
-                await this.securityUtils.addToProcessingQueue(() => this.processFile(file));
-            }
-            
-            // Show results
-            this.showResults();
-        } catch (error) {
-            this.showError('Validation Error', this.securityUtils.sanitizeErrorMessage(error));
-        }
-    }
-
-    /**
-     * Handle selected folders
-     */
-    async handleFolders(files) {
-        if (files.length === 0) return;
-
-        try {
-            // Validate batch size and file sizes
-            this.securityUtils.validateBatchSize(files);
-            
-            // Validate each file
-            for (const file of files) {
-                this.securityUtils.validateFileSize(file);
-                // Allow various file types in folders (azw3, opf, jpg, png, gif)
-                const allowedExtensions = ['azw3', 'opf', 'jpg', 'jpeg', 'png', 'gif', 'json'];
-                this.securityUtils.validateFileExtension(file.name, allowedExtensions);
-            }
-
-            // Clear previous results
-            this.clearResults();
-            
-            // Show processing section
-            document.getElementById('processingSection').style.display = 'block';
-            
-            // Group files by folder
-            const folderGroups = this.groupFilesByFolder(files);
-            
-            // Process each folder with rate limiting
-            for (const [folderPath, folderFiles] of folderGroups) {
-                await this.securityUtils.addToProcessingQueue(() => this.processFolderGroup(folderPath, folderFiles));
-            }
-            
-            // Show results
-            this.showResults();
-        } catch (error) {
-            this.showError('Validation Error', this.securityUtils.sanitizeErrorMessage(error));
-        }
-    }
-
-    /**
-     * Group files by their folder path
-     */
-    groupFilesByFolder(files) {
-        const groups = new Map();
-        
+    buildJobs(files) {
+        const grouped = new Map();
         for (const file of files) {
             const path = file.webkitRelativePath || file._syntheticPath || file.name;
-            const folderPath = path.includes('/') ? path.substring(0, path.lastIndexOf('/')) : '';
-            
-            if (!groups.has(folderPath)) {
-                groups.set(folderPath, []);
-            }
-            groups.get(folderPath).push(file);
+            const directory = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+            if (!grouped.has(directory)) grouped.set(directory, []);
+            grouped.get(directory).push(file);
         }
-        
-        return groups;
-    }
-
-    /**
-     * Process a folder group containing AZW3, OPF, and cover files
-     */
-    async processFolderGroup(folderPath, files) {
-        const folderName = folderPath.split('/').pop() || 'Root';
-        const fileId = this.generateFolderId(folderPath, files);
-        
-        try {
-            // Add folder to processing list
-            this.addFolderToProcessingList(folderName, fileId, files.length);
-            
-            // Find required files
-            const azw3File = files.find(f => f.name.toLowerCase().endsWith('.azw3'));
-            const opfFile = files.find(f => f.name.toLowerCase().endsWith('.opf'));
-            const coverFile = files.find(f =>
-                f.name.toLowerCase().includes('cover') &&
-                /\.(jpg|jpeg|png|gif)$/i.test(f.name)
-            );
-            
-            if (!azw3File) {
-                throw new Error('No AZW3 file found in folder');
-            }
-            
-            // Update status
-            this.updateFileStatus(fileId, 'Reading files...', 10);
-            
-            // Parse OPF metadata if available
-            let metadata = null;
-            if (opfFile) {
-                this.updateFileStatus(fileId, 'Parsing metadata...', 20);
-                const opfContent = await this.readFileAsText(opfFile);
-                const opfData = this.opfParser.parseOPF(opfContent);
-                metadata = opfData.metadata;
-            }
-            
-            // Update status
-            this.updateFileStatus(fileId, 'Parsing AZW3 format...', 40);
-            
-            // Parse the AZW3 file
-            const buffer = await this.readFileAsArrayBuffer(azw3File);
-            const parsedData = await this.parser.parseFile(buffer);
-            
-            // Merge metadata
-            if (metadata) {
-                parsedData.metadata = { ...parsedData.metadata, ...metadata };
-            }
-            
-            if (parsedData.images.length === 0) {
-                throw new Error('No images found in the AZW3 file');
-            }
-            
-            // Update status
-            this.updateFileStatus(fileId, `Found ${parsedData.images.length} images, creating CBZ...`, 70);
-            
-            // Create CBZ file with enhanced metadata (offload to worker when available)
-            const cbzBlob = await this.createEnhancedCBZ(parsedData, azw3File.name, coverFile);
-            
-            // Update status
-            this.updateFileStatus(fileId, 'Conversion complete!', 100, 'complete');
-            
-            // Store completed file
-            this.completedFiles.set(fileId, {
-                originalName: azw3File.name,
-                folderName: folderName,
-                cbzBlob,
-                imageCount: parsedData.images.length,
-                metadata: parsedData.metadata,
-                hasCover: !!coverFile,
-                hasMetadata: !!opfFile
-            });
-            
-        } catch (error) {
-            console.error('Error processing folder:', error);
-            const sanitizedError = this.securityUtils.sanitizeErrorMessage(error);
-            this.updateFileStatus(fileId, `Error: ${sanitizedError}`, 0, 'error');
-            this.errors.push({
-                fileName: `${folderName} (folder)`,
-                error: sanitizedError
-            });
-        }
-    }
-
-    /**
-     * Process a single AZW3 file
-     */
-    async processFile(file) {
-        const fileId = this.generateFileId(file);
-        
-        try {
-            // Add file to processing list
-            this.addFileToProcessingList(file, fileId);
-            
-            // Update status
-            this.updateFileStatus(fileId, 'Reading file...', 10);
-            
-            // Read file as ArrayBuffer
-            const buffer = await this.readFileAsArrayBuffer(file);
-            
-            // Update status
-            this.updateFileStatus(fileId, 'Parsing AZW3 format...', 30);
-            
-            // Parse the AZW3 file
-            const parsedData = await this.parser.parseFile(buffer);
-            
-            if (parsedData.images.length === 0) {
-                throw new Error('No images found in the file');
-            }
-            
-            // Update status
-            this.updateFileStatus(fileId, `Found ${parsedData.images.length} images, creating CBZ...`, 60);
-            
-            // Create CBZ file (offload to worker when available)
-            const cbzBlob = await this.createCBZ(parsedData, file.name);
-            
-            // Update status
-            this.updateFileStatus(fileId, 'Conversion complete!', 100, 'complete');
-            
-            // Store completed file
-            this.completedFiles.set(fileId, {
-                originalName: file.name,
-                cbzBlob,
-                imageCount: parsedData.images.length,
-                metadata: parsedData.metadata
-            });
-            
-        } catch (error) {
-            console.error('Error processing file:', error);
-            const sanitizedError = this.securityUtils.sanitizeErrorMessage(error);
-            this.updateFileStatus(fileId, `Error: ${sanitizedError}`, 0, 'error');
-            this.errors.push({
-                fileName: file.name,
-                error: sanitizedError
-            });
-        }
-    }
-
-    /**
-     * Create CBZ file from parsed data
-     */
-    async createCBZ(parsedData, originalFileName) {
-        const metadata = {
-            title: parsedData.metadata.title,
-            author: parsedData.metadata.author,
-            publisher: parsedData.metadata.publisher,
-            pageCount: parsedData.images.length,
-            convertedFrom: originalFileName,
-            convertedAt: new Date().toISOString()
-        };
-
-        // Try worker
-        try {
-            const { blob } = await this.postToWorker('createCBZ', {
-                images: parsedData.images.map(img => ({ filename: img.filename, data: img.data })),
-                metadata,
-                store: true
-            });
-            return blob;
-        } catch (_) {
-            // Fallback to main thread
-        }
-
-        const zip = new JSZip();
-        for (const image of parsedData.images) {
-            zip.file(image.filename, image.data);
-        }
-        zip.file('metadata.json', JSON.stringify(metadata, null, 2));
-        return await zip.generateAsync({ type: 'blob', compression: 'STORE', compressionOptions: { level: 0 } });
-    }
-
-    /**
-     * Create enhanced CBZ file with OPF metadata and cover
-     */
-    async createEnhancedCBZ(parsedData, originalFileName, coverFile) {
-        // Generate ComicInfo.xml from OPF metadata
-        const comicInfoXml = this.opfParser.generateComicInfo(
-            parsedData.metadata,
-            parsedData.images.length + (coverFile ? 1 : 0)
-        );
-
-        // Add enhanced metadata file
-        const metadata = {
-            title: parsedData.metadata.title,
-            creator: parsedData.metadata.creator,
-            author: parsedData.metadata.creator,
-            publisher: parsedData.metadata.publisher,
-            description: parsedData.metadata.description,
-            series: parsedData.metadata.series,
-            seriesIndex: parsedData.metadata.seriesIndex,
-            genre: parsedData.metadata.genre,
-            language: parsedData.metadata.language,
-            date: parsedData.metadata.date,
-            identifier: parsedData.metadata.identifier,
-            pageCount: parsedData.images.length + (coverFile ? 1 : 0),
-            hasCover: !!coverFile,
-            convertedFrom: originalFileName,
-            convertedAt: new Date().toISOString(),
-            custom: parsedData.metadata.custom
-        };
-
-        // Try worker
-        try {
-            let coverPayload = null;
-            if (coverFile) {
-                const coverData = await this.readFileAsArrayBuffer(coverFile);
-                const ext = coverFile.name.split('.').pop().toLowerCase();
-                coverPayload = { filename: `000_cover.${ext}`, data: coverData };
-            }
-            const { blob } = await this.postToWorker('createEnhancedCBZ', {
-                images: parsedData.images.map(img => ({ filename: img.filename, data: img.data })),
-                comicInfoXml,
-                cover: coverPayload,
-                metadata,
-                store: true
-            });
-            return blob;
-        } catch (_) {
-            // Fallback to main thread
-        }
-
-        const zip = new JSZip();
-        if (coverFile) {
-            const coverData = await this.readFileAsArrayBuffer(coverFile);
-            const coverExtension = coverFile.name.split('.').pop().toLowerCase();
-            zip.file(`000_cover.${coverExtension}`, coverData);
-        }
-        for (const image of parsedData.images) {
-            zip.file(image.filename, image.data);
-        }
-        zip.file('ComicInfo.xml', comicInfoXml);
-        zip.file('metadata.json', JSON.stringify(metadata, null, 2));
-        return await zip.generateAsync({ type: 'blob', compression: 'STORE', compressionOptions: { level: 0 } });
-    }
-
-    /**
-     * Read file as text
-     */
-    readFileAsText(file) {
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = (e) => resolve(e.target.result);
-            reader.onerror = () => reject(new Error('Failed to read file as text'));
-            reader.readAsText(file);
-        });
-    }
-
-    /**
-     * Read file as ArrayBuffer
-     */
-    readFileAsArrayBuffer(file) {
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = (e) => resolve(e.target.result);
-            reader.onerror = () => reject(new Error('Failed to read file'));
-            reader.readAsArrayBuffer(file);
-        });
-    }
-
-    /**
-     * Generate unique file ID
-     */
-    generateFileId(file) {
-        return `file_${this.securityUtils.generateSecureId()}`;
-    }
-
-    /**
-     * Generate unique folder ID
-     */
-    generateFolderId(folderPath, files) {
-        return `folder_${this.securityUtils.generateSecureId()}`;
-    }
-
-    /**
-     * Add folder to processing list UI
-     */
-    addFolderToProcessingList(folderName, fileId, fileCount) {
-        const fileList = document.getElementById('fileList');
-        
-        const fileItem = this.securityUtils.createSafeElement('div', '', 'file-item');
-        fileItem.id = `file-${fileId}`;
-        
-        // Create title
-        const title = this.securityUtils.createSafeElement('h4', `${folderName} (${fileCount} files)`);
-        
-        // Create progress bar container
-        const progressBar = this.securityUtils.createSafeElement('div', '', 'progress-bar');
-        const progressFill = this.securityUtils.createSafeElement('div', '', 'progress-fill');
-        progressFill.id = `progress-${fileId}`;
-        progressBar.appendChild(progressFill);
-        
-        // Create status
-        const status = this.securityUtils.createSafeElement('div', 'Preparing...', 'status processing');
-        status.setAttribute('role', 'status');
-        status.setAttribute('aria-live', 'polite');
-        status.setAttribute('aria-atomic', 'true');
-        status.id = `status-${fileId}`;
-        
-        fileItem.appendChild(title);
-        fileItem.appendChild(progressBar);
-        fileItem.appendChild(status);
-        fileList.appendChild(fileItem);
-    }
-
-    /**
-     * Add file to processing list UI
-     */
-    addFileToProcessingList(file, fileId) {
-        const fileList = document.getElementById('fileList');
-        
-        const fileItem = this.securityUtils.createSafeElement('div', '', 'file-item');
-        fileItem.id = `file-${fileId}`;
-        
-        // Create title
-        const title = this.securityUtils.createSafeElement('h4', file.name);
-        
-        // Create progress bar container
-        const progressBar = this.securityUtils.createSafeElement('div', '', 'progress-bar');
-        const progressFill = this.securityUtils.createSafeElement('div', '', 'progress-fill');
-        progressFill.id = `progress-${fileId}`;
-        progressBar.appendChild(progressFill);
-        
-        // Create status
-        const status = this.securityUtils.createSafeElement('div', 'Preparing...', 'status processing');
-        status.setAttribute('role', 'status');
-        status.setAttribute('aria-live', 'polite');
-        status.setAttribute('aria-atomic', 'true');
-        status.id = `status-${fileId}`;
-        
-        fileItem.appendChild(title);
-        fileItem.appendChild(progressBar);
-        fileItem.appendChild(status);
-        fileList.appendChild(fileItem);
-    }
-
-    /**
-     * Update file processing status
-     */
-    updateFileStatus(fileId, message, progress, statusClass = 'processing') {
-        const progressElement = document.getElementById(`progress-${fileId}`);
-        const statusElement = document.getElementById(`status-${fileId}`);
-        
-        if (progressElement) {
-            progressElement.style.width = `${progress}%`;
-        }
-        
-        if (statusElement) {
-            statusElement.textContent = message;
-            statusElement.className = `status ${statusClass}`;
-        }
-    }
-
-    /**
-     * Show results section
-     */
-    showResults() {
-        // Hide processing section
-        document.getElementById('processingSection').style.display = 'none';
-        
-        // Show completed files
-        if (this.completedFiles.size > 0) {
-            this.showCompletedFiles();
-        }
-        
-        // Show errors if any
-        if (this.errors.length > 0) {
-            this.showErrors();
-        }
-    }
-
-    /**
-     * Show completed files
-     */
-    showCompletedFiles() {
-        const resultsSection = document.getElementById('resultsSection');
-        const downloadList = document.getElementById('downloadList');
-        
-        downloadList.innerHTML = '';
-        
-        for (const [fileId, fileData] of this.completedFiles) {
-            const downloadItem = document.createElement('div');
-            downloadItem.className = 'download-item';
-            
-            const cbzFileName = fileData.originalName.replace(/\.azw3$/i, '.cbz');
-            const fileSize = this.formatFileSize(fileData.cbzBlob.size);
-            
-            // Build metadata info
-            let metadataInfo = `${fileData.imageCount} pages • ${fileSize}`;
-            if (fileData.folderName) {
-                metadataInfo = `📁 ${fileData.folderName} • ${metadataInfo}`;
-            }
-            if (fileData.hasCover) {
-                metadataInfo += ' • 🖼️ Cover';
-            }
-            if (fileData.hasMetadata) {
-                metadataInfo += ' • 📋 Metadata';
-            }
-            
-            // Create download info section
-            const downloadInfo = this.securityUtils.createSafeElement('div', '', 'download-info');
-            
-            // Add series info if available
-            let titleDisplay = cbzFileName;
-            if (fileData.metadata && fileData.metadata.series) {
-                titleDisplay = `${fileData.metadata.series}${fileData.metadata.seriesIndex ? ` #${fileData.metadata.seriesIndex}` : ''} - ${titleDisplay}`;
-            }
-            
-            const title = this.securityUtils.createSafeElement('h4', titleDisplay);
-            const info = this.securityUtils.createSafeElement('p', metadataInfo);
-            
-            downloadInfo.appendChild(title);
-            downloadInfo.appendChild(info);
-            
-            // Add description if available
-            if (fileData.metadata && fileData.metadata.description) {
-                const description = fileData.metadata.description.substring(0, 100);
-                const descText = description + (fileData.metadata.description.length > 100 ? '...' : '');
-                const descElement = this.securityUtils.createSafeElement('small', descText);
-                downloadInfo.appendChild(descElement);
-            }
-            
-            // Create download button
-            const downloadBtn = this.securityUtils.createSafeElement('button', 'Download CBZ', 'download-btn');
-            downloadBtn.addEventListener('click', () => this.downloadFile(fileId));
-            
-            downloadItem.appendChild(downloadInfo);
-            downloadItem.appendChild(downloadBtn);
-            
-            downloadList.appendChild(downloadItem);
-        }
-        
-        // Show/hide download all button based on number of files
-        const downloadAllBtn = document.getElementById('downloadAllBtn');
-        const saveAllBtn = document.getElementById('saveAllBtn');
-        if (this.completedFiles.size > 1) {
-            downloadAllBtn.style.display = 'flex';
-            // Show Save All only if File System Access API is available
-            if (window.showDirectoryPicker) {
-                saveAllBtn.style.display = 'flex';
-            } else {
-                saveAllBtn.style.display = 'none';
-            }
-        } else {
-            downloadAllBtn.style.display = 'none';
-            if (saveAllBtn) saveAllBtn.style.display = 'none';
-        }
-        
-        resultsSection.style.display = 'block';
-    }
-
-    /**
-     * Save all CBZ files directly to a chosen folder (File System Access API)
-     */
-    async saveAllToFolder() {
-        if (!window.showDirectoryPicker) {
-            this.showError('Not supported', 'Your browser does not support saving to a folder. Use Download All instead.');
-            return;
-        }
-        if (this.completedFiles.size === 0) return;
-
-        const saveAllBtn = document.getElementById('saveAllBtn');
-        const originalText = saveAllBtn.innerHTML;
-        try {
-            saveAllBtn.disabled = true;
-            saveAllBtn.innerHTML = '💾 Saving...';
-
-            const dirHandle = await window.showDirectoryPicker();
-            for (const [_, fileData] of this.completedFiles) {
-                const cbzFileName = fileData.originalName.replace(/\.azw3$/i, '.cbz');
-                const fileHandle = await dirHandle.getFileHandle(cbzFileName, { create: true });
-                const writable = await fileHandle.createWritable();
-                await writable.write(fileData.cbzBlob);
-                await writable.close();
-            }
-
-            saveAllBtn.innerHTML = '✅ Saved!';
-            setTimeout(() => {
-                saveAllBtn.innerHTML = originalText;
-                saveAllBtn.disabled = false;
-            }, 1500);
-        } catch (error) {
-            console.error('Save All failed:', error);
-            saveAllBtn.innerHTML = '❌ Error';
-            setTimeout(() => {
-                saveAllBtn.innerHTML = originalText;
-                saveAllBtn.disabled = false;
-            }, 1500);
-        }
-    }
-
-    /**
-     * Show errors
-     */
-    showErrors() {
-        const errorSection = document.getElementById('errorSection');
-        const errorList = document.getElementById('errorList');
-        
-        errorList.innerHTML = '';
-        
-        for (const error of this.errors) {
-            const errorItem = this.securityUtils.createSafeElement('div', '', 'error-item');
-            
-            const fileName = this.securityUtils.createSafeElement('h4', error.fileName);
-            const errorMsg = this.securityUtils.createSafeElement('p', error.error);
-            
-            errorItem.appendChild(fileName);
-            errorItem.appendChild(errorMsg);
-            errorList.appendChild(errorItem);
-        }
-        
-        errorSection.style.display = 'block';
-    }
-
-    /**
-     * Download converted file
-     */
-    downloadFile(fileId) {
-        const fileData = this.completedFiles.get(fileId);
-        if (!fileData) return;
-        
-        const cbzFileName = fileData.originalName.replace(/\.azw3$/i, '.cbz');
-        const url = URL.createObjectURL(fileData.cbzBlob);
-        
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = cbzFileName;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        
-        // Clean up the URL object
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-    }
-
-    /**
-     * Download all converted files as a single ZIP
-     */
-    async downloadAllFiles() {
-        if (this.completedFiles.size === 0) return;
-
-        const downloadAllBtn = document.getElementById('downloadAllBtn');
-        const originalText = downloadAllBtn.innerHTML;
-        
-        try {
-            // Disable button and show progress
-            downloadAllBtn.disabled = true;
-            downloadAllBtn.innerHTML = '📦 Creating ZIP...';
-
-            // Create a new ZIP file containing all CBZ files
-            const zip = new JSZip();
-            
-            // Add each CBZ file to the ZIP
-            for (const [fileId, fileData] of this.completedFiles) {
-                const cbzFileName = fileData.originalName.replace(/\.azw3$/i, '.cbz');
-                
-                // Add the CBZ blob to the ZIP
-                zip.file(cbzFileName, fileData.cbzBlob);
-            }
-
-            // Update button text
-            downloadAllBtn.innerHTML = '📦 Generating ZIP...';
-
-            // Generate the ZIP file (STORE to avoid recompressing CBZ files). Try worker first.
-            let zipBlob;
-            try {
-                const entries = [];
-                for (const [_, fileData] of this.completedFiles) {
-                    const name = fileData.originalName.replace(/\.azw3$/i, '.cbz');
-                    entries.push({ name, data: fileData.cbzBlob });
+        const jobs = [];
+        for (const [directory, group] of grouped) {
+            const books = group.filter(file => /\.azw3$/i.test(file.name));
+            const opfs = group.filter(file => /\.opf$/i.test(file.name));
+            const covers = group.filter(file => /\.(jpe?g|png|gif)$/i.test(file.name));
+            for (const file of books) {
+                const stem = file.name.replace(/\.azw3$/i, '').toLowerCase();
+                const sameStemOpfs = opfs.filter(sidecar => sidecar.name.replace(/\.opf$/i, '').toLowerCase() === stem);
+                const sameStemCovers = covers.filter(sidecar => sidecar.name.replace(/\.(jpe?g|png|gif)$/i, '').toLowerCase() === stem);
+                const warnings = [];
+                const choose = (matches, kind) => {
+                    if (matches.length > 1) warnings.push(`Multiple matching ${kind} sidecars; using ${matches.sort((a, b) => a.name.localeCompare(b.name))[0].name}.`);
+                    return matches[0] || null;
+                };
+                let opf = choose(sameStemOpfs, 'OPF');
+                let cover = choose(sameStemCovers, 'cover');
+                if (books.length === 1) {
+                    opf ||= choose(opfs.filter(sidecar => /^metadata\.opf$/i.test(sidecar.name)), 'OPF');
+                    cover ||= choose(covers.filter(sidecar => /^cover\.(jpe?g|png|gif)$/i.test(sidecar.name)), 'cover');
+                } else if (!opf && opfs.length || !cover && covers.some(sidecar => /^cover\./i.test(sidecar.name))) {
+                    warnings.push('Shared folder sidecars are ambiguous and were not attached.');
                 }
-                const { blob } = await this.postToWorker('createOuterZip', { entries, store: true });
-                zipBlob = blob;
-            } catch (_) {
-                zipBlob = await zip.generateAsync({ type: 'blob', compression: 'STORE', compressionOptions: { level: 0 } });
+                jobs.push({ file, opf, cover, directory, warnings });
             }
+        }
+        return jobs;
+    }
 
-            // Create download link
-            const timestamp = new Date().toISOString().slice(0, 19).replace(/[:-]/g, '');
-            const zipFileName = `comic_collection_${timestamp}.zip`;
-            
-            const url = URL.createObjectURL(zipBlob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = zipFileName;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-
-            // Clean up
-            setTimeout(() => URL.revokeObjectURL(url), 1000);
-
-            // Show success message briefly
-            downloadAllBtn.innerHTML = '✅ Downloaded!';
-            setTimeout(() => {
-                downloadAllBtn.innerHTML = originalText;
-                downloadAllBtn.disabled = false;
-            }, 2000);
-
+    async processJob(job) {
+        const id = `file_${this.securityUtils.generateSecureId()}`;
+        this.addProcessingRow(id, job.file.name);
+        try {
+            this.securityUtils.validateFileSize(job.file);
+            this.securityUtils.validateFileExtension(job.file.name, ['azw3']);
+            this.updateFileStatus(id, 'Reading AZW3…', 15);
+            const prepared = await this.prepareResult(job, {});
+            this.ensureBudget(prepared.estimate);
+            this.updateFileStatus(id, 'Creating CBZ…', 70);
+            const result = await this.archivePrepared(prepared, this.uniqueOutputName(job.file.name));
+            result.id = id;
+            this.completedFiles.set(id, result);
+            this.retainedBytes += result.cbzBlob.size;
+            this.updateFileStatus(id, 'Conversion complete', 100, 'complete');
+            return true;
         } catch (error) {
-            console.error('Error creating ZIP file:', error);
-            downloadAllBtn.innerHTML = '❌ Error';
-            setTimeout(() => {
-                downloadAllBtn.innerHTML = originalText;
-                downloadAllBtn.disabled = false;
-            }, 2000);
+            if (/Retained output limit/.test(error.message)) { this.updateFileStatus(id, 'Not converted: retained output limit reached.', 0, 'error'); throw error; }
+            this.updateFileStatus(id, `Error: ${this.securityUtils.sanitizeErrorMessage(error)}`, 0, 'error');
+            this.errors.push({ fileName: job.file.name, error: this.securityUtils.sanitizeErrorMessage(error) });
+            return false;
         }
     }
 
-    /**
-     * Clear all results and reset the interface
-     */
-    clearResults() {
-        // Clear data
-        this.processingFiles.clear();
-        this.completedFiles.clear();
-        this.errors = [];
-        
-        // Clear UI
-        document.getElementById('fileList').innerHTML = '';
-        document.getElementById('downloadList').innerHTML = '';
-        document.getElementById('errorList').innerHTML = '';
-        
-        // Hide sections
-        document.getElementById('processingSection').style.display = 'none';
-        document.getElementById('resultsSection').style.display = 'none';
-        document.getElementById('errorSection').style.display = 'none';
-        
-        // Hide download all button
-        document.getElementById('downloadAllBtn').style.display = 'none';
-        
-        // Reset file input
-        document.getElementById('fileInput').value = '';
+    async prepareResult(job, settings, metadataSnapshot = null) {
+        const parsed = await this.parser.parseFile(await this.readFileAsArrayBuffer(job.file));
+        if (!parsed.images.length) throw new Error('No supported image resources were found');
+        let metadata = metadataSnapshot || parsed.metadata;
+        if (!metadataSnapshot && job.opf) {
+            if (job.opf.size > 1024 * 1024) job.warnings.push('Ignored OPF sidecar larger than 1 MiB.');
+            else try {
+                const opf = this.opfParser.parseOPF(await this.readFileAsText(job.opf));
+                if (opf.isValid) metadata = this.opfParser.mergeMetadata(parsed.metadata, opf.metadata);
+                else job.warnings.push(`Ignored invalid OPF: ${opf.error}`);
+            } catch (_) { job.warnings.push('Ignored unreadable OPF sidecar.'); }
+        }
+        metadata = { ...metadata, title: metadata.title || this.fileTitle(job.file.name), author: metadata.author || metadata.creator || '', creator: metadata.creator || metadata.author || '', publisher: metadata.publisher || '' };
+        for (const warning of parsed.imageWarnings || []) if (!job.warnings.includes(warning)) job.warnings.push(warning);
+        let selected = this.parser.buildSelection(parsed.images, metadata, settings);
+        const sidecarInfo = await this.optionalSidecarInfo(job.cover, job.warnings);
+        let sidecar = null;
+        if (settings.coverRecordIndex === 'sidecar') {
+            sidecar = sidecarInfo;
+            if (!sidecar) throw new Error('The selected cover sidecar is not a supported image');
+            selected = this.parser.nameSelectedImages([sidecar, ...selected]);
+        }
+        if (!selected.length) throw new Error('Filtering left no images to archive');
+        const candidates = parsed.images.map((image, index) => ({ recordIndex: image.recordIndex, ordinal: index + 1, width: image.width, height: image.height, format: image.format, extension: image.extension, isThumbnail: image.recordIndex === metadata.thumbnailRecordIndex, isTiny: this.parser.isTiny(image) }));
+        if (sidecarInfo) candidates.push({ recordIndex: 'sidecar', width: sidecarInfo.width, height: sidecarInfo.height, format: 'Sidecar', extension: job.cover.name.split('.').pop().toLowerCase(), label: job.cover.name });
+        const archive = this.createArchivePayload(job, metadata, selected, parsed.warning);
+        return { job, metadata, selected, candidates, sidecar, settings: { includeSmall: !!settings.includeSmall, coverRecordIndex: settings.coverRecordIndex ?? selected[0].recordIndex }, estimate: archive.estimate, archive, warning: parsed.warning };
     }
 
-    /**
-     * Show error message
-     */
-    showError(title, message) {
-        this.errors.push({
-            fileName: title,
-            error: message
+    async readSidecar(file) {
+        if (!file) return null;
+        const data = new Uint8Array(await this.readFileAsArrayBuffer(file));
+        const info = this.parser.identifyImage(data);
+        return info ? { ...info, data, recordIndex: 'sidecar', filename: '' } : null;
+    }
+
+    async optionalSidecarInfo(file, warnings) {
+        if (!file) return null;
+        try {
+            this.securityUtils.validateFileSize(file);
+            const sidecar = await this.readSidecar(file);
+            if (!sidecar) warnings.push('Ignored unsupported cover sidecar.');
+            return sidecar;
+        } catch (_) { warnings.push('Ignored cover sidecar that could not be read.'); return null; }
+    }
+
+    async archivePrepared(prepared, outputName, credit = 0) {
+        const payload = prepared.archive.payload;
+        let blob;
+        try { ({ blob } = await this.postToWorker('createArchive', payload)); }
+        catch (_) { blob = await this.createArchiveFallback(payload); }
+        if (this.retainedBytes - credit + blob.size > this.maxRetainedBytes) throw new Error('Retained output limit reached. Save or clear completed results before converting more.');
+        const preview = await this.createPreview(prepared.selected[0]);
+        const warnings = [...new Set([...prepared.job.warnings.filter(warning => warning !== 'Cover preview unavailable; the archive is unchanged.'), ...(preview.warning ? [preview.warning] : [])])];
+        return {
+            sourceFile: prepared.job.file, opfFile: prepared.job.opf, coverFile: prepared.job.cover, outputName, cbzBlob: blob,
+            imageCount: prepared.selected.length, metadata: prepared.metadata, candidates: prepared.candidates, selectedCover: prepared.settings.coverRecordIndex,
+            includeSmall: prepared.settings.includeSmall, warnings, previewUrl: preview.url, estimate: prepared.estimate
+        };
+    }
+
+    async createPreview(image) {
+        let bitmap;
+        try {
+            const type = `image/${image.extension === 'jpg' ? 'jpeg' : image.extension}`;
+            bitmap = await createImageBitmap(new Blob([image.data], { type }));
+            const scale = Math.min(1, 192 / bitmap.width, 256 / bitmap.height);
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+            canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+            canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+            const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error('Canvas encoding failed')), 'image/png'));
+            return { url: URL.createObjectURL(blob) };
+        } catch (_) { return { url: '', warning: 'Cover preview unavailable; the archive is unchanged.' }; }
+        finally { bitmap?.close(); }
+    }
+
+    async createArchiveFallback({ images, comicInfoXml, metadataJson }) {
+        const zip = new JSZip();
+        for (const image of images) zip.file(image.filename, image.data);
+        zip.file('ComicInfo.xml', comicInfoXml);
+        zip.file('metadata.json', metadataJson);
+        return zip.generateAsync({ type: 'blob', compression: 'STORE', compressionOptions: { level: 0 } });
+    }
+
+    createArchivePayload(job, metadata, selected, warning) {
+        const comicInfoXml = this.opfParser.generateComicInfo(metadata, selected.length);
+        const archiveMetadata = { ...metadata, pageCount: selected.length, convertedFrom: job.file.name, warning };
+        const metadataJson = JSON.stringify(archiveMetadata, null, 2);
+        const textBytes = new TextEncoder().encode(comicInfoXml).byteLength + new TextEncoder().encode(metadataJson).byteLength;
+        const imageBytes = selected.reduce((total, image) => total + image.data.byteLength, 0);
+        const estimate = imageBytes + textBytes + 8192 + (selected.length + 2) * 256;
+        return { estimate, payload: { images: selected.map(image => ({ filename: image.filename, data: image.data })), comicInfoXml, metadataJson, store: true } };
+    }
+
+    ensureBudget(estimate, credit = 0) {
+        if (this.retainedBytes - credit + estimate > this.maxRetainedBytes) throw new Error('Retained output limit reached. Save or clear completed results before converting more.');
+    }
+
+    async rebuildResult(id, settings, focusTarget = 'cover') {
+        const current = this.completedFiles.get(id);
+        if (!current || this.activeOperation) return;
+        await this.runOperation('rebuild', async () => {
+            try {
+                const job = { file: current.sourceFile, opf: current.opfFile, cover: current.coverFile, warnings: [...current.warnings] };
+                const prepared = await this.prepareResult(job, settings, current.metadata);
+                this.ensureBudget(prepared.estimate, current.cbzBlob.size);
+                const next = await this.archivePrepared(prepared, current.outputName, current.cbzBlob.size);
+                next.id = id;
+                this.completedFiles.set(id, next);
+                this.retainedBytes += next.cbzBlob.size - current.cbzBlob.size;
+                URL.revokeObjectURL(current.previewUrl);
+                this.showCompletedFiles(id, focusTarget);
+                this.setBatchStatus(`Rebuilt ${current.outputName}.`);
+            } catch (error) { this.showError('Cover rebuild failed', this.securityUtils.sanitizeErrorMessage(error)); this.showCompletedFiles(id, focusTarget); }
         });
-        this.showErrors();
     }
 
-    /**
-     * Format file size for display
-     */
-    formatFileSize(bytes) {
-        return this.securityUtils.formatFileSize(bytes);
+    uniqueOutputName(originalName) {
+        const base = this.safeName(originalName.replace(/\.azw3$/i, '')) || 'Comic';
+        const used = new Set([...this.completedFiles.values()].map(result => this.fileKey(result.outputName)));
+        let suffix = 0; let name = `${base}.cbz`;
+        while (used.has(this.fileKey(name))) name = `${base} (${++suffix}).cbz`;
+        return name;
     }
 
+    safeName(value) { return String(value).replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').replace(/^\.+|\.+$/g, '').trim().slice(0, 180); }
+    fileKey(value) { return String(value).normalize('NFC').toLowerCase(); }
+    fileTitle(name) { return name.replace(/\.azw3$/i, '').replace(/[._-]+/g, ' ').trim() || 'Unknown Comic'; }
 
-    /**
-     * Initialize theme system
-     */
-    initializeTheme() {
-        // Check for saved theme preference
-        const savedTheme = this.securityUtils.safeLocalStorageGet('comic-converter-theme');
-        
-        if (savedTheme) {
-            // Use saved preference
-            this.setTheme(savedTheme);
-        } else {
-            // Default to OS preference - don't save it to localStorage yet
-            // This allows the CSS media queries to handle the default styling
-            const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-            const osTheme = prefersDark ? 'dark' : 'light';
-            
-            // Set the theme without saving to localStorage so it remains responsive to OS changes
-            document.documentElement.setAttribute('data-theme', osTheme);
-            
-            // Update theme toggle icon
-            const themeIcon = document.querySelector('.theme-icon');
-            if (themeIcon) {
-                themeIcon.textContent = osTheme === 'light' ? '🌙' : '☀️';
+    readFileAsText(file) { return file.text ? file.text() : this.readWithFileReader(file, 'readAsText'); }
+    readFileAsArrayBuffer(file) { return file.arrayBuffer ? file.arrayBuffer() : this.readWithFileReader(file, 'readAsArrayBuffer'); }
+    readWithFileReader(file, method) { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error('Failed to read file')); reader[method](file); }); }
+
+    addProcessingRow(id, name) {
+        const item = this.securityUtils.createSafeElement('div', '', 'file-item'); item.id = `file-${id}`;
+        item.append(this.securityUtils.createSafeElement('h4', name), this.securityUtils.createSafeElement('div', '', 'progress-bar'));
+        item.children[1].append(this.securityUtils.createSafeElement('div', '', 'progress-fill'));
+        item.children[1].firstChild.id = `progress-${id}`;
+        const status = this.securityUtils.createSafeElement('div', 'Preparing…', 'status processing'); status.id = `status-${id}`; status.setAttribute('role', 'status'); item.append(status);
+        document.getElementById('fileList').append(item);
+    }
+    updateFileStatus(id, message, progress, state = 'processing') { const bar = document.getElementById(`progress-${id}`); const status = document.getElementById(`status-${id}`); if (bar) bar.style.width = `${progress}%`; if (status) { status.textContent = message; status.className = `status ${state}`; } }
+
+    showResults() { document.getElementById('processingSection').style.display = 'none'; this.showCompletedFiles(); if (this.errors.length) this.showErrors(); }
+    showCompletedFiles(focusId = '', focusTarget = 'cover') {
+        const section = document.getElementById('resultsSection'); const list = document.getElementById('downloadList');
+        list.replaceChildren();
+        for (const [id, result] of this.completedFiles) {
+            const item = document.createElement('div'); item.className = 'download-item'; item.dataset.resultId = id;
+            const preview = document.createElement('img'); preview.className = 'cover-preview'; preview.src = result.previewUrl || ''; preview.alt = result.previewUrl ? `Current cover for ${result.outputName}` : 'Cover preview unavailable';
+            const info = this.securityUtils.createSafeElement('div', '', 'download-info');
+            info.append(this.securityUtils.createSafeElement('h4', result.metadata.title || result.outputName), this.securityUtils.createSafeElement('p', `${result.imageCount} pages • ${this.formatFileSize(result.cbzBlob.size)}`));
+            const label = this.securityUtils.createSafeElement('label', 'Cover page', 'cover-label'); const select = document.createElement('select'); select.dataset.resultId = id; select.setAttribute('aria-label', `Cover page for ${result.outputName}`);
+            for (const candidate of result.candidates) {
+                const option = document.createElement('option'); option.value = candidate.recordIndex; option.selected = String(candidate.recordIndex) === String(result.selectedCover);
+                const detail = `${candidate.width}×${candidate.height}${candidate.isThumbnail ? ', thumbnail' : candidate.isTiny ? ', small image' : ''}`;
+                option.textContent = candidate.recordIndex === 'sidecar' ? `Sidecar: ${candidate.label || 'cover image'} (adds one page)` : `Image ${candidate.ordinal} (${detail})`;
+                select.append(option);
             }
-            
-            // Listen for OS theme changes when no manual preference is set
-            if (window.matchMedia) {
-                const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-                mediaQuery.addEventListener('change', (e) => {
-                    // Only update if user hasn't manually set a preference
-                    if (!this.securityUtils.safeLocalStorageGet('comic-converter-theme')) {
-                        const newOsTheme = e.matches ? 'dark' : 'light';
-                        document.documentElement.setAttribute('data-theme', newOsTheme);
-                        
-                        // Update theme toggle icon
-                        const themeIcon = document.querySelector('.theme-icon');
-                        if (themeIcon) {
-                            themeIcon.textContent = newOsTheme === 'light' ? '🌙' : '☀️';
-                        }
-                    }
-                });
-            }
+            select.addEventListener('change', () => this.rebuildResult(id, { includeSmall: result.includeSmall, coverRecordIndex: select.value === 'sidecar' ? 'sidecar' : Number(select.value) }, 'cover')); label.append(select);
+            const restore = document.createElement('label'); restore.className = 'restore-small'; const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = result.includeSmall; checkbox.addEventListener('change', () => this.rebuildResult(id, { includeSmall: checkbox.checked, coverRecordIndex: result.selectedCover }, 'restore')); restore.append(checkbox, document.createTextNode(' Include thumbnails and small images'));
+            info.append(label, restore, this.securityUtils.createSafeElement('small', result.warnings.filter(Boolean).join(' ')));
+            const download = this.securityUtils.createSafeElement('button', 'Download CBZ', 'download-btn'); download.addEventListener('click', () => this.downloadFile(id));
+            item.append(preview, info, download); list.append(item);
         }
+        const hasResults = this.completedFiles.size > 0;
+        section.style.display = hasResults ? 'block' : 'none';
+        document.getElementById('downloadAllBtn').style.display = this.completedFiles.size > 1 ? 'flex' : 'none';
+        document.getElementById('saveAllBtn').style.display = hasResults && window.showDirectoryPicker ? 'flex' : 'none';
+        document.getElementById('clearBtn').style.display = hasResults || this.errors.length ? 'inline-block' : 'none';
+        if (focusId) list.querySelector(`[data-result-id="${focusId}"] ${focusTarget === 'restore' ? '.restore-small input' : 'select'}`)?.focus();
     }
 
-    /**
-     * Toggle between light and dark themes
-     */
-    toggleTheme() {
-        const currentTheme = document.documentElement.getAttribute('data-theme') || 'light';
-        const newTheme = currentTheme === 'light' ? 'dark' : 'light';
-        this.setTheme(newTheme);
+    downloadFile(id) {
+        const result = this.completedFiles.get(id); if (!result) return;
+        const url = URL.createObjectURL(result.cbzBlob); const link = document.createElement('a'); link.href = url; link.download = result.outputName; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+        this.setBatchStatus(`Download started: ${result.outputName}.`);
     }
 
-    /**
-     * Set the theme
-     */
-    setTheme(theme) {
-        document.documentElement.setAttribute('data-theme', theme);
-        this.securityUtils.safeLocalStorageSet('comic-converter-theme', theme);
-        
-        // Update theme toggle icon
-        const themeIcon = document.querySelector('.theme-icon');
-        if (themeIcon) {
-            themeIcon.textContent = theme === 'light' ? '🌙' : '☀️';
-        }
+    async downloadAllFiles() {
+        if (!this.completedFiles.size) return;
+        await this.runOperation('export', async () => {
+            const entries = [...this.completedFiles.values()].map(result => ({ name: result.outputName, data: result.cbzBlob })); let blob;
+            try { ({ blob } = await this.postToWorker('createOuterZip', { entries, store: true })); }
+            catch (_) { const zip = new JSZip(); entries.forEach(entry => zip.file(entry.name, entry.data)); blob = await zip.generateAsync({ type: 'blob', compression: 'STORE' }); }
+            const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `comic_collection_${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}.zip`; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+            this.setBatchStatus('Download started: comic collection ZIP.');
+        });
     }
+
+    async saveAllToFolder() {
+        if (!window.showDirectoryPicker || !this.completedFiles.size) return;
+        await this.runOperation('save', async () => {
+            let directory;
+            try { directory = await window.showDirectoryPicker({ mode: 'readwrite' }); }
+            catch (error) { if (error.name === 'AbortError') return this.setBatchStatus('Folder save cancelled.'); throw error; }
+            const names = new Set(); const savedNames = []; let saved = 0;
+            try {
+            for await (const name of directory.keys()) names.add(this.fileKey(name));
+                for (const result of this.completedFiles.values()) {
+                    let name = result.outputName; let suffix = 0; const base = name.replace(/\.cbz$/i, '');
+                    while (names.has(this.fileKey(name))) name = `${base} (${++suffix}).cbz`;
+                    let writable;
+                    try { writable = await (await directory.getFileHandle(name, { create: true })).createWritable(); await writable.write(result.cbzBlob); await writable.close(); names.add(this.fileKey(name)); savedNames.push(name); saved++; }
+                    catch (error) { try { await writable?.abort(); } catch (_) {} throw new Error(`${name}: ${error.message || error}`); }
+                }
+                this.setBatchStatus(`Saved ${saved} CBZ file${saved === 1 ? '' : 's'} to the selected folder.`);
+            } catch (error) { this.setBatchStatus(`Saved ${saved} CBZ file${saved === 1 ? '' : 's'} (${savedNames.join(', ') || 'none'}) before save stopped: ${this.securityUtils.sanitizeErrorMessage(error)}`); }
+        });
+    }
+
+    clearResults() {
+        if (this.activeOperation || !this.completedFiles.size && !this.errors.length) return;
+        if (!window.confirm('Clear results? This discards retained downloads from this browser session.')) return;
+        for (const result of this.completedFiles.values()) URL.revokeObjectURL(result.previewUrl);
+        this.completedFiles.clear(); this.errors = []; this.retainedBytes = 0;
+        document.getElementById('fileList').replaceChildren(); document.getElementById('downloadList').replaceChildren(); document.getElementById('errorList').replaceChildren();
+        document.getElementById('resultsSection').style.display = 'none'; document.getElementById('errorSection').style.display = 'none'; document.getElementById('clearBtn').style.display = 'none'; this.setBatchStatus('Results cleared.');
+    }
+
+    async runOperation(name, action) {
+        if (this.activeOperation) return this.setBatchStatus(`Cannot start ${name} while another operation is running.`);
+        const focused = document.activeElement;
+        this.activeOperation = true; this.setBusy(true);
+        try { await action(); } catch (error) { this.showError('Conversion error', this.securityUtils.sanitizeErrorMessage(error)); }
+        finally { this.activeOperation = false; this.setBusy(false); if (focused?.isConnected && !focused.disabled) focused.focus(); }
+    }
+    setBusy(busy) { document.querySelectorAll('#fileInput,#folderInput,#browseBtn,#browseFolderBtn,#clearBtn,#downloadAllBtn,#saveAllBtn,select,.restore-small input').forEach(control => { control.disabled = busy; }); }
+    setBatchStatus(message) { const status = document.getElementById('batchStatus'); if (status) status.textContent = `${message}${this.pendingFileNames.length ? ` Remaining unconverted files: ${this.pendingFileNames.join(', ')}.` : ''}`; }
+    setCapStatus(jobs, index, completed, attempted) { this.pendingFileNames = jobs.slice(index).map(job => job.file.name); this.setBatchStatus(`Attempted ${attempted} of ${jobs.length}; converted ${completed}. Save completed files, then clear results to free space.`); }
+    showError(title, message) { this.errors.push({ fileName: title, error: message }); this.showErrors(); }
+    showErrors() { const section = document.getElementById('errorSection'); const list = document.getElementById('errorList'); list.replaceChildren(...this.errors.map(error => { const item = this.securityUtils.createSafeElement('div', '', 'error-item'); item.append(this.securityUtils.createSafeElement('h4', error.fileName), this.securityUtils.createSafeElement('p', error.error)); return item; })); section.style.display = 'block'; document.getElementById('clearBtn').style.display = 'inline-block'; }
+    formatFileSize(bytes) { return this.securityUtils.formatFileSize(bytes); }
+    initializeTheme() { const theme = this.securityUtils.safeLocalStorageGet('comic-converter-theme') || (window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); this.setTheme(theme, false); }
+    toggleTheme() { this.setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'); }
+    setTheme(theme, save = true) { document.documentElement.dataset.theme = theme; if (save) this.securityUtils.safeLocalStorageSet('comic-converter-theme', theme); const icon = document.querySelector('.theme-icon'); if (icon) icon.textContent = theme === 'dark' ? '☀️' : '🌙'; }
 }
 
-// Initialize the application when the DOM is loaded
-document.addEventListener('DOMContentLoaded', () => {
-    window.app = new ComicConverter();
-});
+document.addEventListener('DOMContentLoaded', () => { window.app = new ComicConverter(); });

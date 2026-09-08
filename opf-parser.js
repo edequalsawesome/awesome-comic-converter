@@ -1,296 +1,54 @@
-/**
- * OPF (Open Packaging Format) Parser
- * Handles parsing of metadata.opf files for enhanced comic book metadata
- */
-
+/* Read the small, optional OPF metadata sidecar without replacing usable MOBI fields. */
 class OPFParser {
-    constructor() {
-        this.parser = new DOMParser();
-        this.securityUtils = new SecurityUtils();
-    }
+    constructor() { this.parser = new DOMParser(); this.securityUtils = new SecurityUtils(); }
 
-    /**
-     * Parse an OPF file and extract metadata
-     * @param {string} opfContent - The OPF file content as string
-     * @returns {Object} - Parsed metadata
-     */
-    parseOPF(opfContent) {
+    parseOPF(content) {
         try {
-            // Validate XML content for security
-            this.securityUtils.validateXmlContent(opfContent);
-            
-            // Limit content size to prevent memory exhaustion
-            if (opfContent.length > 1024 * 1024) { // 1MB limit for OPF files
-                throw new Error('OPF file too large');
-            }
-            
-            const doc = this.parser.parseFromString(opfContent, 'text/xml');
-            
-            // Check for parsing errors
-            const parserError = doc.querySelector('parsererror');
-            if (parserError) {
-                throw new Error('Invalid OPF XML format');
-            }
-
-            const metadata = this.extractMetadata(doc);
-            const manifest = this.extractManifest(doc);
-            const spine = this.extractSpine(doc);
-
-            return {
-                metadata,
-                manifest,
-                spine,
-                isValid: true
-            };
+            if (typeof content !== 'string' || content.length > 1024 * 1024) throw new Error('OPF file is invalid or exceeds 1 MiB');
+            this.securityUtils.validateXmlContent(content);
+            const document = this.parser.parseFromString(content, 'text/xml');
+            if (document.querySelector('parsererror')) throw new Error('Invalid OPF XML format');
+            return { metadata: this.extractMetadata(document), isValid: true };
         } catch (error) {
-            console.warn('Failed to parse OPF file:', error);
-            return {
-                metadata: this.getDefaultMetadata(),
-                manifest: {},
-                spine: [],
-                isValid: false,
-                error: error.message
-            };
+            return { metadata: {}, isValid: false, error: error.message };
         }
     }
 
-    /**
-     * Extract metadata from OPF document
-     */
-    extractMetadata(doc) {
-        const metadata = this.getDefaultMetadata();
-
-        try {
-            // Find metadata element
-            const metadataElement = doc.querySelector('metadata');
-            if (!metadataElement) {
-                return metadata;
+    extractMetadata(document) {
+        const metadata = {};
+        const values = {};
+        for (const element of document.getElementsByTagName('*')) {
+            const name = element.localName;
+            const value = (element.textContent || '').trim();
+            if (value && !values[name]) values[name] = value;
+            if (name === 'meta') {
+                const key = element.getAttribute('name') || element.getAttribute('property');
+                const metaValue = (element.getAttribute('content') || value).trim();
+                if (key === 'calibre:series' && metaValue) metadata.series = metaValue;
+                if (key === 'calibre:series_index' && metaValue) metadata.seriesIndex = metaValue;
             }
-
-            // Extract Dublin Core metadata
-            metadata.title = this.getTextContent(metadataElement, 'dc\\:title, title') || metadata.title;
-            metadata.creator = this.getTextContent(metadataElement, 'dc\\:creator, creator') || metadata.creator;
-            metadata.publisher = this.getTextContent(metadataElement, 'dc\\:publisher, publisher') || metadata.publisher;
-            metadata.description = this.getTextContent(metadataElement, 'dc\\:description, description') || metadata.description;
-            metadata.language = this.getTextContent(metadataElement, 'dc\\:language, language') || metadata.language;
-            metadata.identifier = this.getTextContent(metadataElement, 'dc\\:identifier, identifier') || metadata.identifier;
-            metadata.date = this.getTextContent(metadataElement, 'dc\\:date, date') || metadata.date;
-            metadata.rights = this.getTextContent(metadataElement, 'dc\\:rights, rights') || metadata.rights;
-
-            // Extract additional metadata
-            metadata.series = this.getTextContent(metadataElement, 'meta[name="calibre:series"], meta[property="belongs-to-collection"]') || metadata.series;
-            metadata.seriesIndex = this.getTextContent(metadataElement, 'meta[name="calibre:series_index"]') || metadata.seriesIndex;
-            metadata.genre = this.getTextContent(metadataElement, 'dc\\:subject, subject') || metadata.genre;
-            
-            // Try to get cover reference
-            const coverMeta = metadataElement.querySelector('meta[name="cover"]');
-            if (coverMeta) {
-                metadata.coverRef = coverMeta.getAttribute('content');
-            }
-
-            // Extract custom metadata
-            const customMeta = metadataElement.querySelectorAll('meta[name^="calibre:"], meta[property]');
-            customMeta.forEach(meta => {
-                const name = meta.getAttribute('name') || meta.getAttribute('property');
-                const content = meta.getAttribute('content') || meta.textContent;
-                if (name && content) {
-                    metadata.custom = metadata.custom || {};
-                    metadata.custom[name] = content;
-                }
-            });
-
-        } catch (error) {
-            console.warn('Error extracting metadata:', error);
         }
-
+        const mapping = { title: 'title', creator: 'creator', publisher: 'publisher', description: 'description', language: 'language', date: 'date', identifier: 'identifier', subject: 'genre' };
+        for (const [source, target] of Object.entries(mapping)) if (values[source]) metadata[target] = values[source];
         return metadata;
     }
 
-    /**
-     * Extract manifest from OPF document
-     */
-    extractManifest(doc) {
-        const manifest = {};
-
-        try {
-            const manifestElement = doc.querySelector('manifest');
-            if (!manifestElement) {
-                return manifest;
-            }
-
-            const items = manifestElement.querySelectorAll('item');
-            items.forEach(item => {
-                const id = item.getAttribute('id');
-                const href = item.getAttribute('href');
-                const mediaType = item.getAttribute('media-type');
-                const properties = item.getAttribute('properties');
-
-                if (id && href) {
-                    manifest[id] = {
-                        href,
-                        mediaType,
-                        properties: properties ? properties.split(' ') : []
-                    };
-                }
-            });
-        } catch (error) {
-            console.warn('Error extracting manifest:', error);
-        }
-
-        return manifest;
+    mergeMetadata(embedded, supplied) {
+        const merged = { ...embedded };
+        for (const [key, value] of Object.entries(supplied || {})) if (typeof value === 'string' && value.trim()) merged[key] = value.trim();
+        if (supplied?.creator?.trim()) merged.author = supplied.creator.trim();
+        if (supplied?.author?.trim()) merged.creator = supplied.author.trim();
+        return merged;
     }
 
-    /**
-     * Extract spine from OPF document
-     */
-    extractSpine(doc) {
-        const spine = [];
-
-        try {
-            const spineElement = doc.querySelector('spine');
-            if (!spineElement) {
-                return spine;
-            }
-
-            const itemrefs = spineElement.querySelectorAll('itemref');
-            itemrefs.forEach((itemref, index) => {
-                const idref = itemref.getAttribute('idref');
-                const linear = itemref.getAttribute('linear') !== 'no';
-                
-                if (idref) {
-                    spine.push({
-                        idref,
-                        linear,
-                        order: index
-                    });
-                }
-            });
-        } catch (error) {
-            console.warn('Error extracting spine:', error);
-        }
-
-        return spine;
-    }
-
-    /**
-     * Get text content from element using CSS selector
-     */
-    getTextContent(parent, selector) {
-        try {
-            const element = parent.querySelector(selector);
-            return element ? element.textContent.trim() : null;
-        } catch (error) {
-            return null;
-        }
-    }
-
-    /**
-     * Get default metadata structure
-     */
-    getDefaultMetadata() {
-        return {
-            title: 'Unknown Comic',
-            creator: 'Unknown Author',
-            publisher: 'Unknown Publisher',
-            description: '',
-            language: 'en',
-            identifier: '',
-            date: '',
-            rights: '',
-            series: '',
-            seriesIndex: '',
-            genre: '',
-            coverRef: null,
-            custom: {}
-        };
-    }
-
-    /**
-     * Generate ComicInfo.xml content for CBZ
-     * This is the standard metadata format for comic book archives
-     */
-    generateComicInfo(metadata, pageCount = 0) {
-        const escapeXml = (str) => {
-            if (!str) return '';
-            return str.replace(/[<>&'"]/g, (char) => {
-                switch (char) {
-                    case '<': return '&lt;';
-                    case '>': return '&gt;';
-                    case '&': return '&amp;';
-                    case "'": return '&apos;';
-                    case '"': return '&quot;';
-                    default: return char;
-                }
-            });
-        };
-
-        const comicInfo = `<?xml version="1.0" encoding="UTF-8"?>
-<ComicInfo xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
-           xmlns:xsd="http://www.w3.org/2001/XMLSchema">
-    <Title>${escapeXml(metadata.title)}</Title>
-    <Writer>${escapeXml(metadata.creator)}</Writer>
-    <Publisher>${escapeXml(metadata.publisher)}</Publisher>
-    <Summary>${escapeXml(metadata.description)}</Summary>
-    <LanguageISO>${escapeXml(metadata.language)}</LanguageISO>
-    <Genre>${escapeXml(metadata.genre)}</Genre>
-    <Series>${escapeXml(metadata.series)}</Series>
-    <Number>${escapeXml(metadata.seriesIndex)}</Number>
-    <PageCount>${pageCount}</PageCount>
-    <Year>${metadata.date ? new Date(metadata.date).getFullYear() : ''}</Year>
-    <Month>${metadata.date ? new Date(metadata.date).getMonth() + 1 : ''}</Month>
-    <Day>${metadata.date ? new Date(metadata.date).getDate() : ''}</Day>
-    <Web>${escapeXml(metadata.identifier)}</Web>
-    <Format>Digital</Format>
-    <AgeRating>Unknown</AgeRating>
-    <BlackAndWhite>Unknown</BlackAndWhite>
-    <Manga>Unknown</Manga>
-    <Characters></Characters>
-    <Teams></Teams>
-    <Locations></Locations>
-    <ScanInformation>Converted from AZW3</ScanInformation>
-    <StoryArc></StoryArc>
-    <SeriesGroup></SeriesGroup>
-    <AlternateSeries></AlternateSeries>
-    <AlternateNumber></AlternateNumber>
-    <AlternateCount></AlternateCount>
-    <Notes>Converted using Comic Converter</Notes>
-</ComicInfo>`;
-
-        return comicInfo;
-    }
-
-    /**
-     * Parse a simple metadata.json file as fallback
-     */
-    parseJSON(jsonContent) {
-        try {
-            const data = JSON.parse(jsonContent);
-            const metadata = this.getDefaultMetadata();
-            
-            // Map common JSON fields to our metadata structure
-            if (data.title) metadata.title = data.title;
-            if (data.author || data.creator) metadata.creator = data.author || data.creator;
-            if (data.publisher) metadata.publisher = data.publisher;
-            if (data.description || data.summary) metadata.description = data.description || data.summary;
-            if (data.language) metadata.language = data.language;
-            if (data.series) metadata.series = data.series;
-            if (data.seriesIndex || data.volume) metadata.seriesIndex = data.seriesIndex || data.volume;
-            if (data.genre || data.tags) metadata.genre = Array.isArray(data.genre) ? data.genre.join(', ') : (data.genre || data.tags);
-            if (data.date || data.publishDate) metadata.date = data.date || data.publishDate;
-
-            return {
-                metadata,
-                isValid: true
-            };
-        } catch (error) {
-            return {
-                metadata: this.getDefaultMetadata(),
-                isValid: false,
-                error: error.message
-            };
-        }
+    generateComicInfo(metadata = {}, pageCount = 0) {
+        const escape = value => String(value || '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '').replace(/[<>&'"]/g, character => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[character]));
+        const text = (name, value) => value ? `<${name}>${escape(value)}</${name}>` : '';
+        const date = /^([0-9]{4})-([0-9]{2})-([0-9]{2})(?:T(?:[01][0-9]|2[0-3]):[0-5][0-9](?::[0-5][0-9](?:\.[0-9]+)?)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])?)?$/.exec(metadata.date || '');
+        const validDate = date && (() => { const check = new Date(Date.UTC(Number(date[1]), Number(date[2]) - 1, Number(date[3]))); return check.getUTCFullYear() === Number(date[1]) && check.getUTCMonth() === Number(date[2]) - 1 && check.getUTCDate() === Number(date[3]); })();
+        const dateFields = validDate ? `<Year>${date[1]}</Year><Month>${Number(date[2])}</Month><Day>${Number(date[3])}</Day>` : '';
+        return `<?xml version="1.0" encoding="UTF-8"?>\n<ComicInfo xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema"><Title>${escape(metadata.title)}</Title>${text('Series', metadata.series)}${text('Number', metadata.seriesIndex)}${text('Summary', metadata.description)}${dateFields}${text('Writer', metadata.creator || metadata.author)}${text('Publisher', metadata.publisher)}${text('Genre', metadata.genre)}${text('Web', metadata.identifier)}<PageCount>${pageCount}</PageCount>${text('LanguageISO', metadata.language)}<Format>Digital</Format><Pages><Page Image="0" Type="FrontCover"/></Pages></ComicInfo>`;
     }
 }
 
-// Export for use in other modules
 window.OPFParser = OPFParser;
